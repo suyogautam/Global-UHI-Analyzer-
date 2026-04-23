@@ -1314,7 +1314,7 @@ def add_continuous_colorbar(m, title: str, palette: list, vmin: float, vmax: flo
     cmap.caption = title
     m.add_child(cmap)
 
-def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
+def folium_map_with_layers(ee_images: dict, aoi_geom, map_center, use_mcd12q1: bool = False):
     # Lazy import with fallback — geemap.foliumap crashes on Streamlit Cloud (BoxKeyError)
     try:
         import geemap.foliumap as _gf
@@ -1339,11 +1339,20 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
         m.addLayer(ee_images['NDMI'].clip(aoi_geom), ndmi_vis, 'NDMI')
         add_continuous_colorbar(m, "NDMI", ndmi_vis['palette'], ndmi_vis['min'], ndmi_vis['max'])
 
-    nlcd_img = ee_images['NLCD'].clip(aoi_geom)
-    nlcd_styled, legend_dict = nlcd_styled_and_legend(nlcd_img)
-    m.addLayer(nlcd_styled, {}, 'NLCD Land Cover')
+    # ── Land cover layer: NLCD or MCD12Q1 depending on what was used ─────
+    lc_img = ee_images['NLCD'].clip(aoi_geom)
+    if use_mcd12q1:
+        lc_styled, legend_dict = mcd12q1_styled_and_legend(lc_img)
+        lc_layer_name  = 'MODIS MCD12Q1 Land Cover (IGBP)'
+        lc_legend_title = 'MCD12Q1 Land Cover'
+    else:
+        lc_styled, legend_dict = nlcd_styled_and_legend(lc_img)
+        lc_layer_name  = 'NLCD Land Cover'
+        lc_legend_title = 'NLCD Land Cover'
+
+    m.addLayer(lc_styled, {}, lc_layer_name)
     try:
-        m.add_legend(legend_title='NLCD Land Cover', legend_dict=legend_dict)
+        m.add_legend(legend_title=lc_legend_title, legend_dict=legend_dict)
     except Exception:
         pass
 
@@ -1840,6 +1849,7 @@ if run_btn:
         st.session_state.ee_layers_by_year = ee_layers
         st.session_state.aoi_gdf           = aoi_gdf_ll
         st.session_state.aoi_ee            = aoi_ee
+        st.session_state["use_mcd12q1"]    = use_mcd12q1
         st.session_state["analysis_results"] = {
             "aoi": aoi_ee,
             "years": years,
@@ -2019,7 +2029,12 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                 st.warning(f"No map layers available for {sel_year}.")
             else:
                 center_latlon = get_aoi_center_latlon(st.session_state.aoi_ee)
-                m = folium_map_with_layers(layers, st.session_state.aoi_ee.geometry(), center_latlon)
+                m = folium_map_with_layers(
+                    layers,
+                    st.session_state.aoi_ee.geometry(),
+                    center_latlon,
+                    use_mcd12q1=st.session_state.get("use_mcd12q1", False)
+                )
                 m.to_streamlit(height=520)
                 st.caption("Use the layer control (top-right) to toggle overlays.")
 
@@ -2199,4 +2214,3 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
             
     with t6:
         render_validation_tab()
-
