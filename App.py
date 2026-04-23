@@ -24,11 +24,8 @@
 from __future__ import annotations
 import streamlit as st
 import geemap
-from ee_folium_map import Map as _EEFoliumMap
-
-# Provide a namespace so existing code `geemap_folium.Map` still works
-class geemap_folium:
-    Map = _EEFoliumMap
+# geemap.foliumap is NOT imported here — it crashes on Streamlit Cloud (BoxKeyError).
+# The Map class is imported lazily inside folium_map_with_layers() below.
 import geopandas as gpd
 import pandas as pd
 import zipfile, os, io, tempfile, requests
@@ -1325,7 +1322,13 @@ def add_continuous_colorbar(m, title: str, palette: list, vmin: float, vmax: flo
     m.add_child(cmap)
 
 def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
-    m = geemap_folium.Map(center=map_center, zoom=9)
+    # Lazy import with fallback — geemap.foliumap crashes on Streamlit Cloud (BoxKeyError)
+    try:
+        import geemap.foliumap as _gf
+        m = _gf.Map(center=map_center, zoom=9)
+    except Exception:
+        from ee_folium_map import Map as _FallbackMap
+        m = _FallbackMap(center=map_center, zoom=9)
 
     ndvi_vis = {'min': -0.2, 'max': 0.9, 'palette': ['#f7fcf5','#c7e9c0','#74c476','#238b45','#00441b']}
     ndmi_vis = {'min': -0.6, 'max': 0.6, 'palette': ['#f7fbff','#c6dbef','#67a9cf','#2171b5','#08306b']}
