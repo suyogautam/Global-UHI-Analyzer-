@@ -24,8 +24,11 @@
 from __future__ import annotations
 import streamlit as st
 import geemap
-import geemap_patch 
-import geemap.foliumap as geemap_folium
+from ee_folium_map import Map as _EEFoliumMap
+
+# Provide a namespace so existing code `geemap_folium.Map` still works
+class geemap_folium:
+    Map = _EEFoliumMap
 import geopandas as gpd
 import pandas as pd
 import zipfile, os, io, tempfile, requests
@@ -37,7 +40,6 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from scipy import stats
 from validation_era5 import render_validation_tab
-from auth_handler import render_auth_gate
 
 try:
     import pymannkendall as mk
@@ -121,11 +123,19 @@ Nighttime LST (MODIS) includes a separate **CSV and plots** with a distinct back
 """)
 
 # ----------------------------
-# EE Authentication Gate
+# EE init (cached)
 # ----------------------------
-if not render_auth_gate():
-    st.stop()
-    
+@st.cache_resource(show_spinner=False)
+def initialize_ee():
+    try:
+        geemap.ee_initialize(project="lstapp-457222")
+    except Exception:
+        ee.Initialize()
+    return True
+
+with st.spinner("Initializing Google Earth Engine…"):
+    _ = initialize_ee()
+
 # ----------------------------
 # Census helpers
 # ----------------------------
@@ -2193,4 +2203,3 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
             
     with t6:
         render_validation_tab()
-
