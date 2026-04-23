@@ -24,6 +24,7 @@
 from __future__ import annotations
 import streamlit as st
 import geemap
+import geemap_patch 
 import geemap.foliumap as geemap_folium
 import geopandas as gpd
 import pandas as pd
