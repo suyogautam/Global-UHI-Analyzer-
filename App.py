@@ -59,7 +59,7 @@ from shapely.geometry import shape as shp_shape, Point as shp_Point
 st.set_page_config(page_title="Urban Heat Island Analyzer", page_icon="🌡️", layout="wide")
 st.title("Urban Heat Island (UHI) Analyzer – Landsat + MODIS")
 st.caption(
-    "Analyze urban heat islands globally using Landsat (30 m, US) or MODIS (1 km, global) — "
+    "Analyze urban heat islands globally using Landsat (30 m, US) or MODIS (1 km, global) — "
     "with NLCD or MODIS MCD12Q1 land cover. Trends: Sen’s slope & Mann–Kendall test. "
     "⚠️ NLCD-based analysis is US-only. For cities outside the US, use MODIS + MCD12Q1 land cover."
 )
@@ -67,39 +67,39 @@ st.caption(
 with st.expander("ℹ️ About this App (How it works & outputs)"):
     st.markdown("""
 ### Overview
-Analyze **Urban Heat Island (UHI)** intensity for any location worldwide using **Landsat (30 m)** or **MODIS (1 km)** satellite data via Google Earth Engine. For each year, the app identifies the **hottest month** based on daytime LST, computes spectral indices, and quantifies urban vs. vegetative temperature differences. Results include multi-year trends, interactive maps, and downloadable exports.
+Analyze **Urban Heat Island (UHI)** intensity for any location worldwide using **Landsat (30 m)** or **MODIS (1 km)** satellite data via Google Earth Engine. For each year, the app identifies the **hottest month** based on daytime LST, computes spectral indices, and quantifies urban vs. vegetative temperature differences. Results include multi-year trends, interactive maps, and downloadable exports.
 
-> **🌍 Geographic coverage & data source guide:**
-> - **Landsat + NLCD** → **US only** (NLCD is a US national land cover product).
-> - **MODIS + NLCD** → **US only** for the same reason.
-> - **MODIS + MCD12Q1** → **Global** — recommended for cities outside the US.
+> **Geographic coverage & data source guide:**
+> - **Landsat + NLCD** -> **US only** (NLCD is a US national land cover product).
+> - **MODIS + NLCD** -> **US only** for the same reason.
+> - **MODIS + MCD12Q1** -> **Global** - recommended for cities outside the US.
 >
-> ⚠️ **Small city limitation:** MCD12Q1 has 500 m pixels. Very small cities (urban footprint < ~1–2 km²) may have few or no pixels classified as urban (IGBP class 13), causing missing UHI values for some years. If this occurs, increase the AOI buffer size or switch to Landsat (US only).
+> **Small city limitation (MCD12Q1):** MCD12Q1 has 500 m pixels. Very small cities may have few or no pixels classified as urban (IGBP class 13), causing missing UHI values for some years. Increase the AOI buffer or switch to Landsat (US only) if this happens.
 
 ---
 
 ### What happens under the hood (Google Earth Engine)
 
-#### Landsat (30 m · US recommended · 2000–present)
-1. **Sensors:** Landsat 5 TM (2000–2012), Landsat 8 OLI + Landsat 9 OLI-2 (2013–present) — Collection 2 Level-2.
-2. **Scale factors:** Surface reflectance `SR_* x 0.0000275 - 0.2`; Surface temperature (K) `ST_* x 0.00341802 + 149.0` to deg C.
-3. **Cloud/shadow masking:** `QA_PIXEL` bits (cloud, cloud shadow, dilated cloud).
-4. **Monthly composites:** Median across all cloud-free scenes for the month.
+#### Landsat (30 m - US recommended - 2000-present)
+1. **Sensors:** Landsat 5 TM (2000-2012), Landsat 8 OLI + Landsat 9 OLI-2 (2013-present) - Collection 2 Level-2.
+2. **Scale factors:** Surface reflectance SR_* x 0.0000275 - 0.2; Surface temperature (K) ST_* x 0.00341802 + 149.0 to deg C.
+3. **Cloud/shadow masking:** QA_PIXEL bits (cloud, cloud shadow, dilated cloud).
+4. **Monthly composites:** Median across all cloud-free scenes.
 5. **Hottest month:** Highest AOI-median LST among selected months for each year.
 6. **Outlier filtering:** LST clipped to 5th-95th percentile within AOI.
 7. **Spectral indices:** NDVI, NDMI, NDBI from scaled surface reflectance bands.
 8. **Land cover - NLCD (US only):** Nearest available year (2001-2021). Urban = classes 22-24; Vegetated = 21, 41-43, 52, 71. Water (11) and Cropland (82) excluded.
 9. **UHI = Urban LST - Vegetative LST.** Land-cover percentages from pixel area.
 
-#### MODIS (1 km · Global · 2000–present)
-1. **LST Day:** Terra (`MOD11A1`) + Aqua (`MYD11A1`) merged daily, QC-filtered, median per month to deg C.
-2. **LST Night:** Same hottest month as Day - band `LST_Night_1km`, QC-filtered, median to deg C.
+#### MODIS (1 km - Global - 2000-present)
+1. **LST Day:** Terra (MOD11A1) + Aqua (MYD11A1) merged daily, QC-filtered, median per month to deg C.
+2. **LST Night:** Same hottest month as Day - band LST_Night_1km, QC-filtered, median to deg C.
 3. **Hottest month:** Highest AOI-median daytime LST among selected months.
-4. **Spectral indices:** From `MOD09GA` (scaled x 0.0001): NDVI, NDMI, NDBI monthly medians.
+4. **Spectral indices:** From MOD09GA (scaled x 0.0001): NDVI, NDMI, NDBI monthly medians.
 5. **Land cover options:**
    - **NLCD (30 m, US only):** Biennial, nearest-year snapping - same class logic as Landsat.
-   - **MCD12Q1 (500 m, global):** Annual IGBP Type 1 (2001-present). Urban = class 13; Vegetated = classes 1-10 (forests, shrublands, savannas, grasslands). **Best choice for non-US cities.**
-6. **UHI** computed for both Day and Night separately using the chosen land cover.
+   - **MCD12Q1 (500 m, global):** Annual IGBP Type 1 (2001-present). Urban = class 13; Vegetated = classes 1-10 (forests, shrublands, savannas, grasslands). Best choice for non-US cities.
+6. **UHI** computed for both Day and Night separately.
 
 ---
 
@@ -113,11 +113,11 @@ Analyze **Urban Heat Island (UHI)** intensity for any location worldwide using *
 ---
 
 ### AOI options & outputs
-- **AOI:** U.S. county, U.S. city (Census Places or CCA urban cluster), or any **custom drawn/uploaded polygon** (global).
+- **AOI:** U.S. county, U.S. city (Census Places or CCA urban cluster), or any custom drawn/uploaded polygon (global).
 - **Results table:** CSV with yearly LST, UHI, NDVI, NDMI, NDBI, land-cover percentages.
-- **Interactive map:** Toggle LST, NDVI, NDMI, land cover (NLCD or MCD12Q1 - colorful categorical), UHI, and AOI outline.
+- **Interactive map:** Toggle LST, NDVI, NDMI, land cover (NLCD or MCD12Q1, colorful categorical), UHI, and AOI outline.
 - **GeoTIFF exports:** Any layer for a selected year queued to Google Drive.
-- **Shapefile export (ZIP):** AOI polygon + per-year center-point features with all metrics as attributes (slope/p included).
+- **Shapefile export (ZIP):** AOI polygon + per-year center-point features with all metrics as attributes.
 - **Chart download:** All trend plots as a ZIP of high-resolution PNGs.
 """)
 
@@ -378,8 +378,8 @@ if source.startswith("MODIS"):
         if use_mcd12q1:
             st.caption("🌍 Global coverage · Annual · IGBP classes · 500 m")
             st.info(
-                "⚠️ **Small city note:** MCD12Q1 has 500 m pixels. "
-                "Very small cities may have no urban pixels (IGBP class 13) inside the AOI, "
+                "⚠️ **Small city note:** MCD12Q1 has 500 m pixels. "
+                "Very small cities may have no urban pixels (IGBP class 13) inside the AOI, "
                 "which can cause missing data for some years. "
                 "Try a larger AOI buffer, or use NLCD if analyzing a US city.",
                 icon="ℹ️"
@@ -1250,7 +1250,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
     rural_t    = lst_img.updateMask(veg_m).reduceRegion(ee.Reducer.median(), aoi, 1000, maxPixels=1e9, bestEffort=True).get('LST').getInfo()
     aoi_mean_t = lst_img.reduceRegion(ee.Reducer.mean(), aoi, 1000, maxPixels=1e9, bestEffort=True).get('LST').getInfo()
 
-    # Only require aoi_mean_t — urban/veg may be None for small AOIs with MCD12Q1 (500 m pixels)
+    # Only require aoi_mean_t — urban/veg may be None for small AOIs with MCD12Q1 (500 m pixels)
     if aoi_mean_t is None:
         return None, None, None
 
@@ -1262,9 +1262,9 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         st.warning(f"⚠️ {year}: No vegetative pixels found in AOI — using AOI mean LST as vegetative proxy.")
 
     if use_mcd12q1:
-        up, vp, op = landcover_percentages_mcd(aoi.geometry(), lc_img_clipped, custom_veg_codes, custom_urban_codes)
+        up, vp, op = landcover_percentages_mcd(aoi.geometry(), lc_img, custom_veg_codes, custom_urban_codes)
     else:
-        up, vp, op = landcover_percentages(aoi.geometry(), lc_img_clipped, custom_veg_codes, custom_urban_codes)
+        up, vp, op = landcover_percentages(aoi.geometry(), lc_img, custom_veg_codes, custom_urban_codes)
 
     uhi_val = round(urban_t - rural_t, 2)
     uhi_img = lst_img.updateMask(urban_m).subtract(ee.Image.constant(ee.Number(rural_t))).rename('UHI')
@@ -1312,9 +1312,9 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
         rural_t = aoi_mean_t
 
     if use_mcd12q1:
-        up, vp, op = landcover_percentages_mcd(aoi.geometry(), lc_img_clipped, custom_veg_codes, custom_urban_codes)
+        up, vp, op = landcover_percentages_mcd(aoi.geometry(), lc_img, custom_veg_codes, custom_urban_codes)
     else:
-        up, vp, op = landcover_percentages(aoi.geometry(), lc_img_clipped, custom_veg_codes, custom_urban_codes)
+        up, vp, op = landcover_percentages(aoi.geometry(), lc_img, custom_veg_codes, custom_urban_codes)
 
     uhi_img = lst_img_n.updateMask(urban_m).subtract(ee.Image.constant(ee.Number(rural_t))).rename('UHI')
 
@@ -1855,12 +1855,10 @@ if run_btn:
                 st.error(
                     "❌ **No valid data found.**\n\n"
                     "**Possible causes with MODIS MCD12Q1 land cover:**\n"
-                    "- The AOI may be too small — MCD12Q1 has 500 m pixels, so very small cities "
-                    "may have no pixels classified as urban (IGBP class 13) or vegetated within the AOI.\n"
-                    "- **Fix:** Increase the AOI buffer, use a larger city boundary, or switch to "
-                    "NLCD (US only).\n\n"
-                    "Other causes: no MODIS LST data for the selected months/years, "
-                    "or AOI is outside MODIS coverage area."
+                    "- The AOI may be too small — MCD12Q1 has 500 m pixels, so very small cities "
+                    "may have no pixels classified as urban (IGBP class 13) or vegetated within the AOI.\n"
+                    "- **Fix:** Increase the AOI buffer, use a larger city boundary, or switch to NLCD (US only).\n\n"
+                    "Other causes: no MODIS LST data for the selected months/years, or AOI is outside MODIS coverage area."
                 )
             else:
                 st.error(
