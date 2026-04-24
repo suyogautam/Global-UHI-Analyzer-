@@ -24,7 +24,15 @@ from folium import plugins
 
 def _ee_image_to_tile_url(image: ee.Image, vis_params: dict) -> str:
     """Get a map tile URL from an Earth Engine image."""
-    map_id_dict = ee.data.getMapId({**vis_params, "image": image})
+    # Coerce min/max/gain to plain Python float so they serialise correctly
+    # and don't trigger 'int/float has no attribute split' inside folium/branca.
+    safe_params = {}
+    for k, v in vis_params.items():
+        if isinstance(v, (int, float)):
+            safe_params[k] = float(v)
+        else:
+            safe_params[k] = v
+    map_id_dict = ee.data.getMapId({**safe_params, "image": image})
     return map_id_dict["tile_fetcher"].url_format
 
 
