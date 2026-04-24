@@ -22,18 +22,39 @@ from folium import plugins
 
 # ── EE → tile URL helper ──────────────────────────────────────────────────────
 
-def _ee_image_to_tile_url(image: ee.Image, vis_params: dict) -> str:
-    """Get a map tile URL from an Earth Engine image."""
-    # Coerce min/max/gain to plain Python float so they serialise correctly
-    # and don't trigger 'int/float has no attribute split' inside folium/branca.
-    safe_params = {}
+def _sanitize_vis_params(vis_params: dict) -> dict:
+    """
+    Ensure all numeric values in vis_params are Python-native floats/ints.
+    The EE API serialises these to JSON correctly, but some folium/branca
+    versions call .split() on every value they encounter — passing a raw
+    Python int or float triggers 'int/float object has no attribute split'.
+    Converting to float here makes the dict safe for both paths.
+    """
+    safe = {}
     for k, v in vis_params.items():
         if isinstance(v, (int, float)):
-            safe_params[k] = float(v)
+            safe[k] = float(v)
+        elif isinstance(v, list):
+            # palette lists must stay as lists; numeric lists → float
+            safe[k] = [float(x) if isinstance(x, (int, float)) else x for x in v]
         else:
-            safe_params[k] = v
+            safe[k] = v
+    return safe
+
+
+def _ee_image_to_tile_url(image: ee.Image, vis_params: dict) -> str:
+    """
+    Get a map tile URL from an Earth Engine image.
+    Returns a plain string URL, guaranteed — raises on failure.
+    """
+    safe_params = _sanitize_vis_params(vis_params)
     map_id_dict = ee.data.getMapId({**safe_params, "image": image})
-    return map_id_dict["tile_fetcher"].url_format
+    url = map_id_dict["tile_fetcher"].url_format
+    # Paranoia guard: if somehow we get a non-string, stringify it so folium
+    # doesn't crash with 'int/float has no attribute split'
+    if not isinstance(url, str):
+        raise TypeError(f"EE tile_fetcher returned non-string URL: {type(url)} {url!r}")
+    return url
 
 
 # ── Map class ─────────────────────────────────────────────────────────────────
@@ -67,16 +88,21 @@ class Map(folium.Map):
         """Add an Earth Engine image as a tile layer."""
         if vis_params is None:
             vis_params = {}
+
         try:
+            # Resolve EE object to an Image
             if isinstance(ee_object, ee.Image):
                 img = ee_object
-            elif isinstance(ee_object, (ee.ImageCollection,)):
+            elif isinstance(ee_object, ee.ImageCollection):
                 img = ee_object.mosaic()
             else:
-                # FeatureCollection / Geometry — rasterise as paint
+                # FeatureCollection / Geometry — paint as raster outline
                 img = ee.Image().byte().paint(ee_object, 1, 2)
 
+            # Get tile URL — this is where 'split' errors originate if vis_params
+            # contains raw int/float min/max. _ee_image_to_tile_url sanitizes them.
             url = _ee_image_to_tile_url(img, vis_params)
+
             folium.TileLayer(
                 tiles=url,
                 attr="Google Earth Engine",
@@ -86,8 +112,8 @@ class Map(folium.Map):
                 show=shown,
                 opacity=opacity,
             ).add_to(self)
+
         except Exception as e:
-            # Don't crash the whole map if one layer fails
             import streamlit as st
             st.warning(f"⚠️ Could not add layer '{name}': {e}")
 
@@ -115,7 +141,6 @@ class Map(folium.Map):
         legend_html = f"""
         <div id="legend" style="
             position: fixed;
-            {position.replace('bottom','bottom:').replace('right','right:').replace('left','left:').replace('top','top:')};
             bottom: 30px; right: 10px;
             z-index: 1000;
             background: rgba(255,255,255,0.92);
