@@ -2,7 +2,7 @@ streamlit>=1.35.0
 earthengine-api>=0.1.380
 geemap==0.37.2
 python-box>=7.0.0,<8.0.0
-folium==0.14.0
+folium>=0.14.0
 streamlit-folium>=0.20.0
 geopandas>=0.14.0
 pandas>=2.0.0
@@ -13,4 +13,4 @@ scipy>=1.11.0
 requests>=2.31.0
 pymannkendall>=1.4.3
 shapely>=2.0.0
-branca==0.7.0
+branca>=0.7.0
