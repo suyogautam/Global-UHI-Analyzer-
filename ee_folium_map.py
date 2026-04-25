@@ -24,19 +24,26 @@ from folium import plugins
 
 def _sanitize_vis_params(vis_params: dict) -> dict:
     """
-    Ensure all numeric values in vis_params are Python-native floats/ints.
-    The EE API serialises these to JSON correctly, but some folium/branca
-    versions call .split() on every value they encounter — passing a raw
-    Python int or float triggers 'int/float object has no attribute split'.
-    Converting to float here makes the dict safe for both paths.
+    Convert vis_params into the format the EE Python API's getMapId() expects.
+
+    The EE API internally calls .split() on param values to detect
+    comma-separated strings (e.g. palette). On Streamlit Cloud (newer
+    earthengine-api versions), passing raw Python int/float for min/max
+    causes "float object has no attribute 'split'" deep inside EE's
+    data serialization layer.
+
+    Fix: convert all scalar numeric values to strings, and convert list
+    values (palette) to a comma-joined string — exactly what EE expects.
     """
     safe = {}
     for k, v in vis_params.items():
-        if isinstance(v, (int, float)):
-            safe[k] = float(v)
-        elif isinstance(v, list):
-            # palette lists must stay as lists; numeric lists → float
-            safe[k] = [float(x) if isinstance(x, (int, float)) else x for x in v]
+        if isinstance(v, list):
+            # EE accepts palette as comma-joined string or list — use string
+            # to be safe across all API versions
+            safe[k] = ",".join(str(x) for x in v)
+        elif isinstance(v, (int, float)):
+            # Must be a string so EE's internal .split() calls don't crash
+            safe[k] = str(v)
         else:
             safe[k] = v
     return safe
@@ -46,12 +53,20 @@ def _ee_image_to_tile_url(image: ee.Image, vis_params: dict) -> str:
     """
     Get a map tile URL from an Earth Engine image.
     Returns a plain string URL, guaranteed — raises on failure.
+
+    Uses image.getMapId() (instance method) instead of ee.data.getMapId()
+    because the instance method handles serialization internally and is
+    more stable across earthengine-api versions on hosted environments.
     """
     safe_params = _sanitize_vis_params(vis_params)
-    map_id_dict = ee.data.getMapId({**safe_params, "image": image})
+    try:
+        # Preferred: use the image instance method (more stable)
+        map_id_dict = image.getMapId(safe_params)
+    except Exception:
+        # Fallback: use ee.data.getMapId with image embedded in params
+        map_id_dict = ee.data.getMapId({**safe_params, "image": image})
+
     url = map_id_dict["tile_fetcher"].url_format
-    # Paranoia guard: if somehow we get a non-string, stringify it so folium
-    # doesn't crash with 'int/float has no attribute split'
     if not isinstance(url, str):
         raise TypeError(f"EE tile_fetcher returned non-string URL: {type(url)} {url!r}")
     return url
