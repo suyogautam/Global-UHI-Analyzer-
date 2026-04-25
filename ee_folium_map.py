@@ -10,7 +10,7 @@ This module re-implements only the methods App.py actually calls:
   - m.addLayer(ee_image, vis_params, name)
   - m.add_legend(legend_title, legend_dict)
   - m.addLayerControl() / m.add_layer_control()
-  - m.add_child(child)   ← used by add_continuous_colorbar via branca
+  - m.add_child(child)
 """
 
 from __future__ import annotations
@@ -24,25 +24,29 @@ from folium import plugins
 
 def _sanitize_vis_params(vis_params: dict) -> dict:
     """
-    Convert vis_params into the format the EE Python API's getMapId() expects.
+    Convert vis_params so every scalar value is a plain Python string.
 
-    The EE API internally calls .split() on param values to detect
-    comma-separated strings (e.g. palette). On Streamlit Cloud (newer
-    earthengine-api versions), passing raw Python int/float for min/max
-    causes "float object has no attribute 'split'" deep inside EE's
-    data serialization layer.
+    WHY THIS IS NEEDED ON STREAMLIT CLOUD:
+    Both earthengine-api and folium/branca internals call .split() on
+    vis_param values at various points to detect comma-separated strings
+    (e.g. palette) and to build URL query params.  On Streamlit Cloud,
+    newer package versions resolve to code paths that hit these .split()
+    calls even on min/max values.  Passing raw int/float causes:
+        "float object has no attribute 'split'"
 
-    Fix: convert all scalar numeric values to strings, and convert list
-    values (palette) to a comma-joined string — exactly what EE expects.
+    The EE server accepts min/max as strings ("20.0") and coerces them
+    back to numbers, so this conversion is safe.
     """
     safe = {}
     for k, v in vis_params.items():
-        if isinstance(v, list):
-            # EE accepts palette as comma-joined string or list — use string
-            # to be safe across all API versions
-            safe[k] = ",".join(str(x) for x in v)
+        if k == "palette":
+            # Keep palette as a list of strings — EE serialises this correctly
+            if isinstance(v, list):
+                safe[k] = [str(x) for x in v]
+            else:
+                safe[k] = [x.strip() for x in str(v).split(",")]
         elif isinstance(v, (int, float)):
-            # Must be a string so EE's internal .split() calls don't crash
+            # Convert to string to avoid every .split() trap
             safe[k] = str(v)
         else:
             safe[k] = v
@@ -52,23 +56,27 @@ def _sanitize_vis_params(vis_params: dict) -> dict:
 def _ee_image_to_tile_url(image: ee.Image, vis_params: dict) -> str:
     """
     Get a map tile URL from an Earth Engine image.
-    Returns a plain string URL, guaranteed — raises on failure.
 
-    Uses image.getMapId() (instance method) instead of ee.data.getMapId()
-    because the instance method handles serialization internally and is
-    more stable across earthengine-api versions on hosted environments.
+    Uses image.getMapId(vis_params) (instance method) rather than
+    ee.data.getMapId() because the instance method serialises the image
+    object correctly without embedding it as a raw dict value, avoiding
+    the internal .split() calls that crash on hosted environments.
     """
     safe_params = _sanitize_vis_params(vis_params)
+
     try:
-        # Preferred: use the image instance method (more stable)
+        # Primary path: instance method, most stable across API versions
         map_id_dict = image.getMapId(safe_params)
     except Exception:
-        # Fallback: use ee.data.getMapId with image embedded in params
-        map_id_dict = ee.data.getMapId({**safe_params, "image": image})
+        # Fallback: class-level data method
+        try:
+            map_id_dict = ee.data.getMapId({**safe_params, "image": image})
+        except Exception as e2:
+            raise RuntimeError(f"getMapId failed: {e2}") from e2
 
     url = map_id_dict["tile_fetcher"].url_format
     if not isinstance(url, str):
-        raise TypeError(f"EE tile_fetcher returned non-string URL: {type(url)} {url!r}")
+        raise TypeError(f"tile_fetcher.url_format is {type(url)}, expected str")
     return url
 
 
@@ -81,7 +89,6 @@ class Map(folium.Map):
     """
 
     def __init__(self, center=(0, 0), zoom=3, **kwargs):
-        # folium.Map uses location=[lat, lon], zoom_start
         super().__init__(
             location=list(center),
             zoom_start=zoom,
@@ -114,8 +121,6 @@ class Map(folium.Map):
                 # FeatureCollection / Geometry — paint as raster outline
                 img = ee.Image().byte().paint(ee_object, 1, 2)
 
-            # Get tile URL — this is where 'split' errors originate if vis_params
-            # contains raw int/float min/max. _ee_image_to_tile_url sanitizes them.
             url = _ee_image_to_tile_url(img, vis_params)
 
             folium.TileLayer(
@@ -125,12 +130,12 @@ class Map(folium.Map):
                 overlay=True,
                 control=True,
                 show=shown,
-                opacity=opacity,
+                opacity=float(opacity),  # ensure float, not ee.Number etc.
             ).add_to(self)
 
         except Exception as e:
             import streamlit as st
-            st.warning(f"⚠️ Could not add layer '{name}': {e}")
+            st.warning(f"Could not add layer '{name}': {e}")
 
     # ── add_legend ───────────────────────────────────────────────────────────
 
