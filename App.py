@@ -49,7 +49,7 @@ from datetime import datetime
 from streamlit_folium import st_folium
 import folium
 from folium.plugins import Draw, Fullscreen, MousePosition, Geocoder
-import branca.colormap as bcm
+
 
 from shapely.geometry import shape as shp_shape, Point as shp_Point
 
@@ -1310,9 +1310,46 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
 # Map & Legends & Drive export
 # ----------------------------
 def add_continuous_colorbar(m, title: str, palette: list, vmin: float, vmax: float, position='bottomright'):
-    cmap = bcm.LinearColormap(colors=palette, vmin=vmin, vmax=vmax)
-    cmap.caption = title
-    m.add_child(cmap)
+    """
+    Inject a CSS gradient colorbar directly into the folium map HTML.
+    Bypasses branca.LinearColormap entirely to avoid the 'float has no
+    attribute split' crash that occurs on Streamlit Cloud with newer
+    branca versions (>=0.7) where vmin/vmax are expected to be strings
+    internally but we pass floats.
+    """
+    gradient = ", ".join(palette)
+    colorbar_html = f"""
+    <div style="
+        position: fixed;
+        bottom: 30px;
+        right: 10px;
+        z-index: 1000;
+        background: rgba(255,255,255,0.92);
+        border: 1px solid #aaa;
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-family: Arial, sans-serif;
+        font-size: 11px;
+        box-shadow: 2px 2px 6px rgba(0,0,0,0.25);
+        min-width: 160px;
+    ">
+        <div style="font-weight:bold; margin-bottom:4px; font-size:12px">{title}</div>
+        <div style="
+            height: 14px;
+            width: 100%;
+            background: linear-gradient(to right, {gradient});
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            margin-bottom: 3px;
+        "></div>
+        <div style="display:flex; justify-content:space-between;">
+            <span>{vmin}</span>
+            <span>{(vmin + vmax) / 2:.1f}</span>
+            <span>{vmax}</span>
+        </div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(colorbar_html))
 
 def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
     # Always use our own Map class on hosted deployments.
