@@ -1156,7 +1156,8 @@ def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
         'Satellite': sat_label,
         'NLCD_Year': nlcd_year,
-        'EE_Images': {'LST': lst_filtered, 'NDVI': ndvi, 'NDMI': ndmi, 'NLCD': nlcd, 'UHI': uhi_img}
+        'EE_Images': {'LST': lst_filtered, 'NDVI': ndvi, 'NDMI': ndmi, 'NDBI': ndbi,
+                      'LC': nlcd, 'LC_TYPE': 'NLCD', 'UHI': uhi_img}
     }
 
 # ----------------------------
@@ -1263,7 +1264,9 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
         'NLCD_Year': lc_year,
         'EE_Images': {'LST': lst_img, 'NDVI': index_img.select('NDVI'),
-                      'NDMI': index_img.select('NDMI'), 'NLCD': lc_img, 'UHI': uhi_img}
+                      'NDMI': index_img.select('NDMI'), 'NDBI': index_img.select('NDBI'),
+                      'LC': lc_img, 'LC_TYPE': 'MCD12Q1' if use_mcd12q1 else 'NLCD',
+                      'UHI': uhi_img}
     }
     return rec_day, best_m, lst_img
 
@@ -1303,92 +1306,65 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
         'UHI': round(urban_t - rural_t, 2),
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
         'NLCD_Year': lc_year,
-        'EE_Images': {'LST': lst_img_n, 'NLCD': lc_img, 'UHI': uhi_img}
+        'EE_Images': {'LST': lst_img_n, 'LC': lc_img, 'LC_TYPE': 'MCD12Q1' if use_mcd12q1 else 'NLCD', 'UHI': uhi_img}
     }
 
 # ----------------------------
 # Map & Legends & Drive export
 # ----------------------------
-def add_continuous_colorbar(m, title: str, palette: list, vmin: float, vmax: float, position='bottomright'):
-    """
-    Inject a CSS gradient colorbar directly into the folium map HTML.
-    Bypasses branca.LinearColormap entirely to avoid the 'float has no
-    attribute split' crash that occurs on Streamlit Cloud with newer
-    branca versions (>=0.7) where vmin/vmax are expected to be strings
-    internally but we pass floats.
-    """
-    gradient = ", ".join(palette)
-    colorbar_html = f"""
-    <div style="
-        position: fixed;
-        bottom: 30px;
-        right: 10px;
-        z-index: 1000;
-        background: rgba(255,255,255,0.92);
-        border: 1px solid #aaa;
-        border-radius: 6px;
-        padding: 8px 12px;
-        font-family: Arial, sans-serif;
-        font-size: 11px;
-        box-shadow: 2px 2px 6px rgba(0,0,0,0.25);
-        min-width: 160px;
-    ">
-        <div style="font-weight:bold; margin-bottom:4px; font-size:12px">{title}</div>
-        <div style="
-            height: 14px;
-            width: 100%;
-            background: linear-gradient(to right, {gradient});
-            border: 1px solid #ccc;
-            border-radius: 3px;
-            margin-bottom: 3px;
-        "></div>
-        <div style="display:flex; justify-content:space-between;">
-            <span>{vmin}</span>
-            <span>{(vmin + vmax) / 2:.1f}</span>
-            <span>{vmax}</span>
-        </div>
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(colorbar_html))
 
 def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
-    # Always use our own Map class on hosted deployments.
-    # geemap.foliumap is tried first for local compatibility but its addLayer
-    # passes raw int/float min/max into tile URL construction, triggering
-    # "'int'/'float' object has no attribute 'split'" on Streamlit Cloud.
-    # Our ee_folium_map.Map sanitizes vis_params before calling getMapId().
     from ee_folium_map import Map as _EEMap
     m = _EEMap(center=map_center, zoom=9)
 
-    # All min/max values are explicit floats — safe for any EE/folium version.
+    # Vis params — all values are explicit floats
     ndvi_vis = {'min': -0.2, 'max': 0.9, 'palette': ['#f7fcf5','#c7e9c0','#74c476','#238b45','#00441b']}
     ndmi_vis = {'min': -0.6, 'max': 0.6, 'palette': ['#f7fbff','#c6dbef','#67a9cf','#2171b5','#08306b']}
+    ndbi_vis = {'min': -0.5, 'max': 0.5, 'palette': ['#2166ac','#f7f7f7','#b2182b']}
     lst_vis  = {'min': 20.0, 'max': 45.0, 'palette': ['#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c']}
     uhi_vis  = {'min': -5.0, 'max':  5.0, 'palette': ['#2166ac','#67a9cf','#f7f7f7','#ef8a62','#b2182b']}
 
+    # Track colorbars to stack them without overlap (each 70px tall)
+    colorbar_layers = []  # list of (title, palette, vmin, vmax)
+
     if 'LST' in ee_images:
         m.addLayer(ee_images['LST'].clip(aoi_geom), lst_vis, 'LST (°C)')
-        add_continuous_colorbar(m, "LST (°C)", lst_vis['palette'], lst_vis['min'], lst_vis['max'])
+        colorbar_layers.append(("LST (°C)", lst_vis['palette'], lst_vis['min'], lst_vis['max']))
 
     if 'NDVI' in ee_images:
         m.addLayer(ee_images['NDVI'].clip(aoi_geom), ndvi_vis, 'NDVI')
-        add_continuous_colorbar(m, "NDVI", ndvi_vis['palette'], ndvi_vis['min'], ndvi_vis['max'])
+        colorbar_layers.append(("NDVI", ndvi_vis['palette'], ndvi_vis['min'], ndvi_vis['max']))
+
     if 'NDMI' in ee_images:
         m.addLayer(ee_images['NDMI'].clip(aoi_geom), ndmi_vis, 'NDMI')
-        add_continuous_colorbar(m, "NDMI", ndmi_vis['palette'], ndmi_vis['min'], ndmi_vis['max'])
+        colorbar_layers.append(("NDMI", ndmi_vis['palette'], ndmi_vis['min'], ndmi_vis['max']))
 
-    nlcd_img = ee_images['NLCD'].clip(aoi_geom)
-    nlcd_styled, legend_dict = nlcd_styled_and_legend(nlcd_img)
-    m.addLayer(nlcd_styled, {}, 'NLCD Land Cover')
-    try:
-        m.add_legend(legend_title='NLCD Land Cover', legend_dict=legend_dict)
-    except Exception:
-        pass
+    if 'NDBI' in ee_images:
+        m.addLayer(ee_images['NDBI'].clip(aoi_geom), ndbi_vis, 'NDBI')
+        colorbar_layers.append(("NDBI", ndbi_vis['palette'], ndbi_vis['min'], ndbi_vis['max']))
+
+    # Land cover layer — route to correct styler based on LC_TYPE flag
+    lc_img_raw = ee_images.get('LC') or ee_images.get('NLCD')  # backwards compat
+    if lc_img_raw is not None:
+        lc_type = ee_images.get('LC_TYPE', 'NLCD')
+        lc_clipped = lc_img_raw.clip(aoi_geom)
+        if lc_type == 'MCD12Q1':
+            lc_styled, legend_dict = mcd12q1_styled_and_legend(lc_clipped)
+            legend_title = 'MODIS MCD12Q1 Land Cover'
+        else:
+            lc_styled, legend_dict = nlcd_styled_and_legend(lc_clipped)
+            legend_title = 'NLCD Land Cover'
+        m.addLayer(lc_styled, {}, legend_title)
+        try:
+            m.add_legend(legend_title=legend_title, legend_dict=legend_dict)
+        except Exception:
+            pass
 
     if 'UHI' in ee_images:
         m.addLayer(ee_images['UHI'].clip(aoi_geom), uhi_vis, 'UHI Intensity (°C)')
-        add_continuous_colorbar(m, "UHI (°C)", uhi_vis['palette'], uhi_vis['min'], uhi_vis['max'])
+        colorbar_layers.append(("UHI (°C)", uhi_vis['palette'], uhi_vis['min'], uhi_vis['max']))
 
+    # AOI boundary
     try:
         fc = ee.FeatureCollection(aoi_geom)
     except Exception:
@@ -1396,8 +1372,44 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
     outline = ee.Image().byte().paint(fc, 1, 2)
     m.addLayer(outline, {'palette': ['#00ffff']}, 'AOI boundary')
 
-    try: m.addLayerControl()
-    except Exception: m.add_layer_control()
+    # Add all colorbars stacked vertically so they don't overlap
+    # Each colorbar is ~68px tall; stack from bottom-left upward
+    bar_height = 72
+    bar_bottom_start = 30
+    for i, (title, palette, vmin, vmax) in enumerate(colorbar_layers):
+        bottom_px = bar_bottom_start + i * bar_height
+        gradient = ", ".join(palette)
+        mid = (vmin + vmax) / 2
+        cb_html = f"""
+        <div style="
+            position: fixed;
+            bottom: {bottom_px}px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(255,255,255,0.92);
+            border: 1px solid #aaa;
+            border-radius: 5px;
+            padding: 5px 10px 4px 10px;
+            font-family: Arial, sans-serif;
+            font-size: 11px;
+            box-shadow: 1px 1px 4px rgba(0,0,0,0.2);
+            min-width: 150px;
+        ">
+            <div style="font-weight:bold;margin-bottom:3px;font-size:11px">{title}</div>
+            <div style="height:12px;width:100%;
+                background:linear-gradient(to right,{gradient});
+                border:1px solid #ccc;border-radius:2px;margin-bottom:2px;"></div>
+            <div style="display:flex;justify-content:space-between;font-size:10px">
+                <span>{vmin}</span><span>{mid:.1f}</span><span>{vmax}</span>
+            </div>
+        </div>
+        """
+        m.get_root().html.add_child(folium.Element(cb_html))
+
+    try:
+        m.addLayerControl()
+    except Exception:
+        m.add_layer_control()
     return m
 
 def export_layers_to_drive(year: int, layers: dict, aoi_fc: ee.FeatureCollection, folder: str, scale: int):
