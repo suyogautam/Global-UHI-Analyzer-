@@ -1,0 +1,61 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: Urban Heat Island (UHI) Analyzer
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Suyog
+    family-names: Gautam
+    name-particle: Suyog
+    email: suyoggtm@gmail.com
+    affiliation: Virginia Tech
+    orcid: 'https://orcid.org/0009-0008-1831-0601'
+repository-code: 'https://github.com/suyogautam/Global-UHI-Analyzer-'
+abstract: >-
+  Urban heat islands (UHIs) — where city surfaces are
+  significantly warmer than surrounding rural areas — are a
+  well-documented consequence of urbanization, yet
+  accessible tools for systematic long-term UHI monitoring
+  remain limited. This study presents an open-source,
+  web-based UHI analysis platform built on Google Earth
+  Engine and Streamlit, enabling satellite-derived thermal
+  and land surface analysis for any user-defined area of
+  interest without requiring local computing resources or
+  programming expertise.
+
+  The platform integrates two complementary satellite
+  pipelines: Landsat Collection 2 Level-2 (Landsat 5/7/8/9,
+  30 m spatial resolution, 2000–present) for fine-scale US
+  analysis, and MODIS Terra/Aqua merged products
+  (MOD11A1/MYD11A1, ~1 km, 2000–present) for global coverage
+  including nighttime land surface temperature. For each
+  year in a user-defined period, the app automatically
+  identifies the peak thermal month, applies
+  quality-controlled compositing, and derives land surface
+  temperature (LST), NDVI, NDMI, and NDBI from
+  atmospherically corrected surface reflectance. Urban and
+  vegetated reference zones are delineated using either the
+  National Land Cover Database (NLCD, 30 m, US-only) or
+  MODIS MCD12Q1 IGBP land cover (500 m, global), with
+  cropland and water excluded from the vegetated reference
+  to reduce phenological noise. UHI intensity is computed as
+  the mean LST difference between urban and vegetated
+  pixels. Temporal trends are assessed using Sen's slope
+  estimator and the Mann–Kendall non-parametric significance
+  test applied to both annual values and 3-year centered
+  moving averages. Satellite-derived LST anomalies are
+  independently validated against ERA5-Land 2 m air
+  temperature reanalysis via Pearson correlation. Outputs
+  include interactive multi-layer maps, downloadable results
+  tables, trend charts, GeoTIFF rasters, and shapefiles with
+  per-year attributes.
+
+  The tool is designed for researchers, urban planners, and
+  climate practitioners seeking reproducible, multi-decadal
+  UHI assessments across diverse geographic contexts and
+  spatial scales.
+license: MIT
