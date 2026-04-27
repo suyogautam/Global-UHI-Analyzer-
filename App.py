@@ -228,7 +228,7 @@ def load_places_for_state(state_fips: str):
 st.sidebar.header("Analysis Parameters")
 
 # NEW: grouped AOI source
-aoi_source = st.sidebar.radio("AOI Source", ["County", "City", "Custom AOI"], index=0)
+aoi_source = st.sidebar.radio("AOI Source", ["County (US only)", "City (US only)", "Custom AOI (US / Global)"], index=0)
 
 states = load_us_states_counties()
 aoi_mode = "County boundary"  # internal switch used by run_btn logic
@@ -242,7 +242,7 @@ selected_city = None
 city_boundary_type = None
 custom_aoi_mode = None
 
-if aoi_source == "County":
+if aoi_source == "County (US only)":
     aoi_mode = "County boundary"
     selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
     state_id = states[selected_state]
@@ -250,7 +250,7 @@ if aoi_source == "County":
     selected_county = st.sidebar.selectbox("Select County", list(counties.keys()))
     county_id = counties[selected_county]
 
-elif aoi_source == "City":
+elif aoi_source == "City (US only)":
     aoi_mode = "Draw AOI"  # city AOI will be provided via custom_aoi_geojson under the hood
     selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
     state_id = states[selected_state]
@@ -268,7 +268,7 @@ elif aoi_source == "City":
     selected_county = selected_city if selected_city else "CityAOI"
     county_id = "000"
 
-elif aoi_source == "Custom AOI":
+elif aoi_source == "Custom AOI (US / Global)":
     aoi_mode = "Draw AOI"
     selected_state, selected_county, state_id, county_id = "Custom", "AOI", "00", "000"
     custom_aoi_mode = st.sidebar.radio(
@@ -1730,11 +1730,11 @@ for key, default in [
 # ----------------------------
 # AOI preview / builder section
 # ----------------------------
-if aoi_source == "County":
+if aoi_source == "County (US only)":
     st.subheader("AOI Preview (County)")
     show_county_preview_map(states[selected_state], counties[selected_county])
 
-elif aoi_source == "City":
+elif aoi_source == "City (US only)":
     st.subheader("AOI Preview (City)")
 
     if not selected_city:
@@ -1831,7 +1831,7 @@ elif aoi_source == "City":
         except Exception as e:
             st.warning(f"Could not build city AOI: {e}")
 
-elif aoi_source == "Custom AOI":
+elif aoi_source == "Custom AOI (US / Global)":
     if custom_aoi_mode == "Draw on map":
         _ = build_draw_aoi_ui()
     else:
