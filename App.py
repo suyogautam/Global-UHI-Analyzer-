@@ -1317,14 +1317,15 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
     from ee_folium_map import Map as _EEMap
     m = _EEMap(center=map_center, zoom=9)
 
-    # Vis params — all values are explicit floats
+    # Vis params — identical to local app
     ndvi_vis = {'min': -0.2, 'max': 0.9, 'palette': ['#f7fcf5','#c7e9c0','#74c476','#238b45','#00441b']}
     ndmi_vis = {'min': -0.6, 'max': 0.6, 'palette': ['#f7fbff','#c6dbef','#67a9cf','#2171b5','#08306b']}
     ndbi_vis = {'min': -0.5, 'max': 0.5, 'palette': ['#2166ac','#f7f7f7','#b2182b']}
     lst_vis  = {'min': 20.0, 'max': 45.0, 'palette': ['#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c']}
     uhi_vis  = {'min': -5.0, 'max':  5.0, 'palette': ['#2166ac','#67a9cf','#f7f7f7','#ef8a62','#b2182b']}
 
-    # Track colorbars to stack them without overlap (each 70px tall)
+    # Collect colorbars to render together as a horizontal strip at the top,
+    # matching the branca.LinearColormap layout used in the local app.
     colorbar_layers = []  # list of (title, palette, vmin, vmax)
 
     if 'LST' in ee_images:
@@ -1343,22 +1344,19 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
         m.addLayer(ee_images['NDBI'].clip(aoi_geom), ndbi_vis, 'NDBI')
         colorbar_layers.append(("NDBI", ndbi_vis['palette'], ndbi_vis['min'], ndbi_vis['max']))
 
-    # Land cover layer — route to correct styler based on LC_TYPE flag
-    lc_img_raw = ee_images.get('LC') or ee_images.get('NLCD')  # backwards compat
+    # Land cover — add as map layer only, NO legend swatches (matches local app behaviour:
+    # local app also only shows layer name in the layer control, no separate swatch panel)
+    lc_img_raw = ee_images.get('LC') or ee_images.get('NLCD')
     if lc_img_raw is not None:
         lc_type = ee_images.get('LC_TYPE', 'NLCD')
         lc_clipped = lc_img_raw.clip(aoi_geom)
         if lc_type == 'MCD12Q1':
-            lc_styled, legend_dict = mcd12q1_styled_and_legend(lc_clipped)
-            legend_title = 'MODIS MCD12Q1 Land Cover'
+            lc_styled, _ = mcd12q1_styled_and_legend(lc_clipped)
+            lc_layer_name = 'MODIS MCD12Q1 Land Cover'
         else:
-            lc_styled, legend_dict = nlcd_styled_and_legend(lc_clipped)
-            legend_title = 'NLCD Land Cover'
-        m.addLayer(lc_styled, {}, legend_title)
-        try:
-            m.add_legend(legend_title=legend_title, legend_dict=legend_dict)
-        except Exception:
-            pass
+            lc_styled, _ = nlcd_styled_and_legend(lc_clipped)
+            lc_layer_name = 'NLCD Land Cover'
+        m.addLayer(lc_styled, {}, lc_layer_name)
 
     if 'UHI' in ee_images:
         m.addLayer(ee_images['UHI'].clip(aoi_geom), uhi_vis, 'UHI Intensity (°C)')
@@ -1372,39 +1370,50 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
     outline = ee.Image().byte().paint(fc, 1, 2)
     m.addLayer(outline, {'palette': ['#00ffff']}, 'AOI boundary')
 
-    # Add all colorbars stacked vertically so they don't overlap
-    # Each colorbar is ~68px tall; stack from bottom-left upward
-    bar_height = 72
-    bar_bottom_start = 30
-    for i, (title, palette, vmin, vmax) in enumerate(colorbar_layers):
-        bottom_px = bar_bottom_start + i * bar_height
-        gradient = ", ".join(palette)
-        mid = (vmin + vmax) / 2
-        cb_html = f"""
+    # ── Colorbars: horizontal strip at the top of the map, side-by-side ──
+    # This replicates what branca.LinearColormap + add_child() produces locally.
+    # Each bar is a fixed-width block; they sit in a flex row pinned to top-left.
+    if colorbar_layers:
+        bar_items_html = ""
+        for title, palette, vmin, vmax in colorbar_layers:
+            gradient = ", ".join(palette)
+            bar_items_html += f"""
+            <div style="margin-right:12px; min-width:140px;">
+              <div style="font-size:11px; font-weight:600; color:#333;
+                          margin-bottom:2px; white-space:nowrap;">{title}</div>
+              <div style="height:10px; width:100%;
+                          background:linear-gradient(to right,{gradient});
+                          border:1px solid #bbb; border-radius:2px;"></div>
+              <div style="display:flex; justify-content:space-between;
+                          font-size:10px; color:#444; margin-top:1px;">
+                <span>{vmin}</span>
+                <span>{(vmin+vmax)/2:.1f}</span>
+                <span>{vmax}</span>
+              </div>
+            </div>"""
+
+        colorbar_html = f"""
         <div style="
             position: fixed;
-            bottom: {bottom_px}px;
-            left: 10px;
+            top: 0px;
+            left: 0px;
             z-index: 1000;
-            background: rgba(255,255,255,0.92);
-            border: 1px solid #aaa;
-            border-radius: 5px;
+            background: rgba(255,255,255,0.90);
+            border-bottom: 1px solid #ccc;
             padding: 5px 10px 4px 10px;
+            display: flex;
+            flex-direction: row;
+            align-items: flex-start;
             font-family: Arial, sans-serif;
-            font-size: 11px;
-            box-shadow: 1px 1px 4px rgba(0,0,0,0.2);
-            min-width: 150px;
+            pointer-events: none;
+            width: auto;
+            max-width: 100%;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
         ">
-            <div style="font-weight:bold;margin-bottom:3px;font-size:11px">{title}</div>
-            <div style="height:12px;width:100%;
-                background:linear-gradient(to right,{gradient});
-                border:1px solid #ccc;border-radius:2px;margin-bottom:2px;"></div>
-            <div style="display:flex;justify-content:space-between;font-size:10px">
-                <span>{vmin}</span><span>{mid:.1f}</span><span>{vmax}</span>
-            </div>
+            {bar_items_html}
         </div>
         """
-        m.get_root().html.add_child(folium.Element(cb_html))
+        m.get_root().html.add_child(folium.Element(colorbar_html))
 
     try:
         m.addLayerControl()
