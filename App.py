@@ -1,25 +1,9 @@
 # UHI Analyzer – Landsat + MODIS (Streamlit app)
-# ------------------------------------------------------------
-# This build includes:
-# • Draw-AOI mode (auto-capture GeoJSON) + city search
-# • County mode preview map (always visible), and AOI overlay on the interactive map
-# • NLCD shown with a colorful categorical palette + legend
-# • Trend charts: Original + 3-year MA with Sen’s slope & MK p-values
-# • Sen’s slope & MK p displayed for Day & Night and added to CSVs + Shapefile
-# • Table shows UHI 3-year MA slope & p (also displayed above the table)
-# • Urban vs Vegetative comparison chart (no trend)
-# • Landsat NDBI
-# • MODIS Nighttime LST: SAME hottest-month (from DAY) + QC; separate CSV + trend + comparison plots
-# • Night charts have slightly darker background
-# • NLCD %: water and cropland excluded from vegetative
-# • Integer year ticks; no comma formatting in years
-# • Drive exports (GeoTIFF)
-# • Seasonal presets (DJF/MAM/JJA/SON)
-# • Shapefile export (AOI polygon + per-year center points with attributes; includes slope/p fields)
-# • Continuous legends (colorbars) for LST / UHI / NDVI / NDMI
-# • Land-cover pie charts downloadable as ZIP
-# • NEW: AOI Source = County / City / Custom AOI
-# ------------------------------------------------------------
+# Satellite-based urban heat island analysis using Google Earth Engine.
+# Supports county, city, drawn polygon, and shapefile AOIs.
+# Landsat 5/7/8/9 (30 m) and MODIS Terra+Aqua (1 km) pipelines.
+# NLCD or MODIS MCD12Q1 land cover for urban/vegetated separation.
+# Outputs: results table, trend charts, interactive maps, GeoTIFF, shapefile, ERA5 validation.
 
 from __future__ import annotations
 import streamlit as st
@@ -59,64 +43,125 @@ from shapely.geometry import shape as shp_shape, Point as shp_Point
 st.set_page_config(page_title="Urban Heat Island Analyzer", page_icon="🌡️", layout="wide")
 st.title("Urban Heat Island (UHI) Analyzer – Landsat + MODIS")
 st.caption(
-    "Charts show Original + 3-year moving average with Sen’s slope and Mann–Kendall p-values. "
-    "Urban vs Vegetative comparison uses NLCD (water & cropland excluded from vegetative)."
+    "Landsat (30 m) or MODIS (1 km) · hottest-month selection per year · "
+    "NDVI, NDMI, NDBI, LST, UHI · trend analysis with Sen’s slope & Mann–Kendall · "
+    "NLCD/MODIS LULC · interactive maps · GeoTIFF & shapefile export. "
+    "**NLCD-based analysis (Landsat & MODIS) is US-only. For global coverage, switch to MODIS + MCD12Q1 land cover.**"
 )
 
-with st.expander("About Urban Heat Island Analysis (How it works & outputs)"):
+with st.expander("🔍 How it works"):
     st.markdown("""
 ### Overview
-Analyze UHI for **any U.S. county** or a **custom drawn AOI** using Landsat (30 m) or MODIS (1 km). For each year, the app selects the **hottest month** (from your month set) based on **daytime LST**, computes indices, and summarizes **urban vs vegetated** temperatures using **NLCD**. You also get trends with **Sen’s slope** and **Mann–Kendall** significance, interactive maps, and exports.
+Analyze UHI for **any U.S. county**, a **city**, or a **custom drawn/uploaded AOI** using **Landsat** (30 m, 2000–2026) or **MODIS** (1 km, 2000–2026). For each year the app identifies the **hottest month** (from your selected month set) based on peak daytime LST, computes spectral indices and land surface temperature, separates urban from vegetated pixels using NLCD or MODIS MCD12Q1 land cover, and calculates UHI intensity. Results include year-by-year tables, trend analysis, interactive maps, and multiple export options.
+
+> ⚠️ **Coverage note:** NLCD-based analysis (Landsat and MODIS) is **US-only**. For areas outside the US, switch to **MODIS + MCD12Q1** land cover. MODIS MCD12Q1 has a 500 m pixel size — small cities where urban-class pixels are absent or sparse within the AOI may return no urban data or unreliable UHI estimates.
 
 ---
 
-### What happens under the hood (Google Earth Engine)
-#### Landsat (30 m; Collection 2 Level-2)
-1. **Image selection:**  
-   - `LANDSAT/LT05/C02/T1_L2` for 2000–2012 (Landsat 5)  
-   - `LANDSAT/LC08/C02/T1_L2` + `LANDSAT/LC09/C02/T1_L2` for 2013+ (Landsat 8/9)  
-   filtered by AOI and month.
-2. **Scale factors:**  
-   - Surface reflectance: `SR_* × 0.0000275 − 0.2`  
-   - Surface temperature (Kelvin): `ST_* × 0.00341802 + 149.0`, then to **°C**.
-3. **Cloud/shadow mask:** `QA_PIXEL` bits (cloud/shadow/dilated).
-4. **Monthly composites:** **Median** per month.
-5. **Pick hottest month (DAY):** Highest AOI **median** LST among selected months.
-6. **Outlier filtering:** Clip LST to **5th–95th percentiles** within AOI.
-7. **Indices:** **NDVI**, **NDMI** from scaled SR bands; **NDBI** from (SWIR − NIR)/(SWIR + NIR).
-8. **NLCD:** Nearest year (2001…2021). Masks:  
-   **Urban** = **22–24** (Developed Low/Medium/High)  
-   **Vegetated** = forest (**41–43**), shrub (**52**), grass (**71**), developed open space (**21**)  
-   *(**Water (11)** and **Cropland (82)** are excluded from **vegetative** by design.)*  
-   **Why exclude Cropland (82):** Highly variable seasonality & management → unstable background and biased UHI.
-9. **Summaries:** Mean LST for **urban**, **vegetative**, overall **Mean LST** (AOI-wide), and **UHI = urban − vegetative**. Land-cover % via pixel area.
+### Landsat pipeline (30 m · Collection 2 Level-2)
+1. **Sensors:** Landsat 5 TM (2000–2012), Landsat 7 ETM+ (gap-fill only), Landsat 8 OLI-TIRS and Landsat 9 (2013–2026) — pulled from `LANDSAT/LT05`, `LC07`, `LC08`, `LC09` C02 T1_L2 collections.
+2. **Scale factors:** Surface reflectance `SR_* × 0.0000275 − 0.2`; surface temperature (Kelvin) `ST_* × 0.00341802 + 149.0` → °C.
+3. **Cloud/shadow masking:** `QA_PIXEL` bitmask (cloud, cloud shadow, dilated cloud).
+4. **Monthly median composites** per selected month.
+5. **Hottest month selection:** Highest AOI-median LST across the selected month set.
+6. **Outlier filtering:** LST clipped to 5th–95th percentiles within AOI before statistics.
+7. **Spectral indices:** NDVI = (NIR − Red)/(NIR + Red); NDMI = (NIR − SWIR1)/(NIR + SWIR1); NDBI = (SWIR1 − NIR)/(SWIR1 + NIR). Bands mapped per sensor.
+8. **Land cover (NLCD):** Nearest available year (2001–2021). Urban = classes 22–24 (Developed Low/Med/High); Vegetated = 41–43, 52, 71, 21. Water (11) and Cropland (82) excluded from vegetated reference.
+9. **UHI = urban median LST − vegetated median LST.** Area percentages computed from pixel counts.
 
-#### MODIS (1 km)
-1. **LST (Day):** Merge Terra + Aqua daily (`MOD11A1` + `MYD11A1`), band `LST_Day_1km`, **QC-filter**, convert to **°C**, median by month.
-2. **Pick hottest month (DAY):** Highest AOI **median** daytime LST among selected months.
-3. **LST (Night):** Use the **same hottest month determined by DAY**, band `LST_Night_1km`, **QC-filter**, convert to **°C**, median.
-4. **Indices (Day only):** From `MOD09GA` (scaled `× 0.0001`): **NDVI**, **NDMI**, **NDBI** monthly medians.
-5. **NLCD masks & UHI:** Same NLCD logic; compute urban/vegetated LST medians; **UHI** for day and night.
+### MODIS pipeline (1 km · Terra + Aqua merged)
+1. **Daytime LST:** `MOD11A1` + `MYD11A1` merged, `LST_Day_1km` band, QC-filtered, scaled to °C, monthly median.
+2. **Hottest month selection:** Highest AOI-median daytime LST.
+3. **Nighttime LST:** Same hottest month, `LST_Night_1km`, same QC and scale logic.
+4. **Spectral indices (day):** `MOD09GA` surface reflectance (× 0.0001), monthly median → NDVI, NDMI, NDBI.
+5. **Land cover:** NLCD (US-only) or MODIS MCD12Q1 IGBP (`MODIS/061/MCD12Q1`, annual 2001–present, global). Urban = class 13; Vegetated = classes 1–10 (forests, shrublands, savannas, grasslands).
+6. **UHI** computed for both day and night using the same urban/vegetated separation.
+
+### Trend analysis
+Each metric (UHI, Mean LST, NDVI, NDMI, NDBI) is plotted as original annual values with a 3-year centered moving average. **Sen’s slope** and **Mann–Kendall p-value** are fitted separately to both the original and smoothed series. UHI slope and p-value are included in the results table and exported CSV.
+
+### Outputs
+- **Results table** (CSV) — yearly metrics, land-cover percentages, slope/p-values.
+- **Trend charts** (PNG ZIP) — UHI, LST, NDVI, NDMI, NDBI, urban vs vegetated comparison.
+- **Interactive map** — toggle LST, NDVI, NDMI, NDBI, LULC, UHI layers; continuous colorbars; AOI outline.
+- **GeoTIFF export** — all raster layers for any selected year queued to Google Drive.
+- **Shapefile export** (ZIP) — AOI polygon + per-year point features with all metrics as attributes.
+- **ERA5 validation tab** — Pearson correlation of satellite LST anomalies against ERA5-Land 2 m air temperature reanalysis.
+""")
+
+with st.expander("📋 How to use this app"):
+    st.markdown("""
+### Step-by-step guide
+
+**1. Authenticate**
+Upload your Google Earth Engine credentials file (or use local auth if running locally). Enter your GEE Project ID and click Authenticate.
+
+**2. Select your sensor platform**
+- *Landsat* — 30 m resolution, US-only NLCD land cover, good for detailed city-scale analysis.
+- *MODIS* — 1 km resolution, supports global coverage when paired with MCD12Q1. Also provides nighttime LST.
+
+**3. Define your Area of Interest (AOI)**
+Choose one of four modes from the sidebar:
+- **County** — select a US state then county; the county boundary is used directly.
+- **City** — select a state and city, then choose Census boundary or CCA-derived urban cluster (1000 m gap).
+- **Draw** — use the drawing tool on the interactive map; finish the polygon and click *Use this polygon*.
+- **Shapefile** — upload a ZIP containing a .shp file (and associated .dbf/.shx/.prj).
+
+**4. Set your time range and months**
+- Choose start and end year (2000–2026).
+- Select individual months or use the season preset (e.g. JJA = Jun–Aug for summer analysis).
+
+**5. Select land cover source** *(MODIS only)*
+- *NLCD* — 30 m, US-only, biennial updates.
+- *MODIS MCD12Q1* — 500 m, global, annual. Required for non-US AOIs. May not detect urban pixels in small cities.
+
+**6. Urban & Vegetative classes** *(optional)*
+Expand the *Urban & Vegetative Reference* panel to customize which land cover classes define the urban and vegetated zones. Default recommended classes are pre-selected.
+
+**7. Run Analysis**
+Click **Run Analysis**. Processing time depends on the number of years and AOI size (typically 1–5 minutes).
 
 ---
 
-### Trend charts & statistics
-For each metric (UHI, Mean LST, NDVI, NDMI, optional NDBI):
-- Plot **original yearly values** (light), plus **3-year centered moving average** (bold).
-- Fit **Sen’s slope** and **Mann–Kendall** p-values **separately** to original and MA series.
-- **Table** includes the **UHI 3-year MA** slope & p-value.
+### Reading the outputs
 
-Nighttime LST (MODIS) includes a separate **CSV and plots** with a distinct background style.
+**Results Table tab**
+- One row per year showing Urban LST, Vegetated LST, Mean LST, UHI intensity, NDVI, NDMI, NDBI, and land-cover percentages.
+- Download as CSV.
 
----
+**Charts tab**
+- Each metric plotted as yearly values + 3-year moving average.
+- Sen’s slope (trend rate in °C/yr or index units/yr) and Mann–Kendall p-value shown for significance.
+- Urban vs Vegetated temperature comparison chart included.
+- Download all charts as a ZIP of PNGs.
 
-### What you can do / outputs
-- **AOI options:** Pick a county, a **city (Census or CCA 1000 m)**, or **draw/upload any polygon**.
-- **Results table:** CSV export includes yearly metrics and NLCD percentages.
-- **Interactive map:** Toggle **LST, NDVI, NDMI, NLCD (colorful), UHI**; AOI outline; legends (categorical + continuous).
-- **Exports:** Queue **GeoTIFF** exports of all layers for the selected year to **Google Drive**.
-- **Shapefile export (ZIP):** AOI polygon + per-year center-point features with all metrics as attributes (incl. slope/p).
-- **Charts:** Download all plots as a **ZIP** of PNGs.
+**Interactive Map tab**
+- Select any year from the dropdown to load that year’s layers.
+- Toggle individual layers (LST, NDVI, NDMI, NDBI, LULC, UHI, AOI boundary) in the layer control (top-right).
+- Horizontal colorbars at the top show the value range for each continuous layer.
+- Export rasters to Google Drive from this tab.
+
+**Land Cover Change tab**
+- Pie charts showing urban/vegetated/other proportions per year.
+
+**Shapefile Export tab**
+- Download AOI and point features with all metrics as attributes for use in GIS software.
+
+**Validation tab**
+- Compares satellite-derived LST anomalies against ERA5-Land 2 m air temperature (Pearson r, p-value, scatter plot, time series).
+""")
+
+with st.expander("🧑‍💻 About the developer"):
+    st.markdown("""
+**Suyog Gautam**
+
+This app was built as an open-source tool for satellite-based urban heat island research using Google Earth Engine.
+
+🔗 [GitHub — github.com/suyogautam](https://github.com/suyogautam)  
+💼 [LinkedIn — Suyog Gautam](https://www.linkedin.com/in/suyog-gautam-76488a253/)
+
+**Open source & citation**  
+This project is open source. If you use or adapt this app for your own work or build a similar tool, please cite using the `cite me` file in the GitHub repository.
 """)
 
 # ----------------------------
@@ -1884,6 +1929,8 @@ if run_btn:
 
         if not results_day:
             st.error("No valid data found for the selected parameters. Adjust years/months/AOI.")
+            if use_mcd12q1:
+                st.warning("⚠️ You are using MODIS MCD12Q1 land cover (500 m). If your AOI covers a small or low-density urban area, there may be no pixels classified as Urban (class 13) within the boundary. Try switching to NLCD (US-only) for finer 30 m urban detection, or expand your AOI to include more of the urban extent.")
             st.stop()
 
         df_day = pd.DataFrame(results_day).sort_values('Year').reset_index(drop=True)
