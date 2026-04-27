@@ -1,0 +1,40 @@
+📌 How to Cite This Project
+
+Thank you for using the Urban Heat Island (UHI) Analyzer!
+
+If you use this tool in your research, publication, or project, please cite it using the metadata provided in the repository’s `CITATION.cff` file.
+
+👉 GitHub automatically generates citation formats (APA, BibTeX, etc.) from this file.
+
+### Quick Steps to Cite:
+
+1. Go to the GitHub repository:
+   https://github.com/suyogautam/Global-UHI-Analyzer-
+
+2. Click on **"Cite this repository"** (usually found on the right sidebar or under the "About" section).
+
+3. Copy your preferred citation format (APA, BibTeX, Chicago, etc.).
+
+---
+
+### Manual Citation (BibTeX Example)
+
+```bibtex
+@software{gautam_uhi_analyzer_2026,
+  author = {Gautam, Suyog},
+  title = {Urban Heat Island (UHI) Analyzer},
+  year = {2026},
+  url = {https://github.com/suyogautam/Global-UHI-Analyzer-}
+}
+```
+
+---
+
+### Notes
+
+* The full citation metadata is maintained in `CITATION.cff`.
+* Please ensure proper attribution when using this software in academic or professional work.
+
+---
+
+If you use this tool, consider ⭐ starring the repository — it helps support the project!
