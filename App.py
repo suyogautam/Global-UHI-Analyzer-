@@ -789,13 +789,31 @@ def landcover_percentages(aoi_geom, nlcd_img, custom_veg_codes=None, custom_urba
 # ----------------------------
 # MCD12Q1 (MODIS Land Cover) helpers — 500 m, annual, global, IGBP Type 1
 # ----------------------------
+@st.cache_data(show_spinner=False)
+def get_latest_mcd12q1_year() -> int:
+    """
+    Query GEE to find the latest available year in the MCD12Q1 collection.
+    Falls back to 2023 if the query fails.
+    """
+    try:
+        col = ee.ImageCollection("MODIS/061/MCD12Q1")
+        latest_date = col.aggregate_max("system:time_start")
+        latest_year = ee.Date(latest_date).get("year").getInfo()
+        return int(latest_year)
+    except Exception:
+        return 2023  # safe fallback
+
+
 def get_mcd12q1_for_year(year: int):
     """
-    Fetch MODIS MCD12Q1 annual land cover (IGBP Type 1) for the given year.
-    Available 2001–present. Years before 2001 fall back to 2001.
-    Returns (ee.Image with 'LC_Type1' band, actual_year).
+    Fetch MCD12Q1 for the requested year.
+    - If the exact year exists, use it.
+    - If not, use the latest available year <= requested year.
+    - Never goes below 2001 (collection start).
     """
-    actual_year = max(2001, min(year, 2023))  # clamp to available range
+    latest_available = get_latest_mcd12q1_year()
+    actual_year = max(2001, min(year, latest_available))
+
     img = (
         ee.ImageCollection("MODIS/061/MCD12Q1")
         .filter(ee.Filter.calendarRange(actual_year, actual_year, 'year'))
