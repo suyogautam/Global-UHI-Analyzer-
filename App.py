@@ -174,22 +174,60 @@ if not render_auth_gate():
 # ----------------------------
 # Census helpers
 # ----------------------------
+
+# Hardcoded fallback — used when the Census API is unreachable
+_FALLBACK_STATES = {
+    "Alabama": "01", "Alaska": "02", "Arizona": "04", "Arkansas": "05",
+    "California": "06", "Colorado": "08", "Connecticut": "09", "Delaware": "10",
+    "Florida": "12", "Georgia": "13", "Hawaii": "15", "Idaho": "16",
+    "Illinois": "17", "Indiana": "18", "Iowa": "19", "Kansas": "20",
+    "Kentucky": "21", "Louisiana": "22", "Maine": "23", "Maryland": "24",
+    "Massachusetts": "25", "Michigan": "26", "Minnesota": "27", "Mississippi": "28",
+    "Missouri": "29", "Montana": "30", "Nebraska": "31", "Nevada": "32",
+    "New Hampshire": "33", "New Jersey": "34", "New Mexico": "35", "New York": "36",
+    "North Carolina": "37", "North Dakota": "38", "Ohio": "39", "Oklahoma": "40",
+    "Oregon": "41", "Pennsylvania": "42", "Rhode Island": "44", "South Carolina": "45",
+    "South Dakota": "46", "Tennessee": "47", "Texas": "48", "Utah": "49",
+    "Vermont": "50", "Virginia": "51", "Washington": "53", "West Virginia": "54",
+    "Wisconsin": "55", "Wyoming": "56", "District of Columbia": "11",
+}
+
+# Hardcoded county fallback — empty dict signals Census API is down
+_CENSUS_API_DOWN = False  # module-level flag set by load_us_states_counties
+
 @st.cache_data(show_spinner=False)
 def load_us_states_counties():
+    global _CENSUS_API_DOWN
     url = "https://api.census.gov/data/2019/acs/acs1?get=NAME&for=state:*"
-    states = {row[0]: row[1] for row in requests.get(url).json()[1:]}
-    return states
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list) or len(data) < 2:
+            raise ValueError("Unexpected format")
+        _CENSUS_API_DOWN = False
+        return {row[0]: row[1] for row in data[1:]}
+    except Exception:
+        _CENSUS_API_DOWN = True
+        return _FALLBACK_STATES
 
 @st.cache_data(show_spinner=False)
 def load_counties(state_id: str):
     url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=county:*&in=state:{state_id}"
-    rows = requests.get(url).json()[1:]
-    counties = {}
-    for row in rows:
-        full = row[0]
-        cid = str(row[-1])
-        counties[full.split(",")[0]] = cid
-    return counties
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        if not isinstance(rows, list) or len(rows) < 2:
+            raise ValueError("Unexpected format")
+        counties = {}
+        for row in rows[1:]:
+            full = row[0]
+            cid = str(row[-1])
+            counties[full.split(",")[0]] = cid
+        return counties
+    except Exception:
+        return {}  # empty dict — County/City modes will be disabled
 
 @st.cache_data(show_spinner=False)
 def load_places_for_state(state_fips: str):
@@ -233,6 +271,15 @@ aoi_source = st.sidebar.radio("AOI Source", ["County (US only)", "City (US only)
 states = load_us_states_counties()
 aoi_mode = "County boundary"  # internal switch used by run_btn logic
 
+# Warn user if Census API was unreachable — County and City modes won't work
+if _CENSUS_API_DOWN:
+    st.warning(
+        "⚠️ **Census API is currently unavailable.** County and City AOI modes require the "
+        "Census Bureau API to fetch state/county lists and boundaries. "
+        "These modes are temporarily disabled.\n\n"
+        "**Use ‘Custom AOI (US / Global)’ to draw or upload your AOI and continue your analysis.**"
+    )
+
 # defaults
 selected_state = "Custom"
 state_id = "00"
@@ -244,17 +291,28 @@ custom_aoi_mode = None
 
 if aoi_source == "County (US only)":
     aoi_mode = "County boundary"
-    selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
-    state_id = states[selected_state]
-    counties = load_counties(state_id)
-    selected_county = st.sidebar.selectbox("Select County", list(counties.keys()))
-    county_id = counties[selected_county]
+    if _CENSUS_API_DOWN:
+        st.sidebar.error("❌ Census API unavailable — switch to Custom AOI.")
+        counties = {}
+    else:
+        selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
+        state_id = states[selected_state]
+        counties = load_counties(state_id)
+        if not counties:
+            st.sidebar.warning("⚠️ Could not load counties. Census API may be temporarily down.")
+        else:
+            selected_county = st.sidebar.selectbox("Select County", list(counties.keys()))
+            county_id = counties[selected_county]
 
 elif aoi_source == "City (US only)":
     aoi_mode = "Draw AOI"  # city AOI will be provided via custom_aoi_geojson under the hood
-    selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
-    state_id = states[selected_state]
-    cities = load_places_for_state(state_id)
+    if _CENSUS_API_DOWN:
+        st.sidebar.error("❌ Census API unavailable — switch to Custom AOI.")
+        cities = []
+    else:
+        selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
+        state_id = states[selected_state]
+        cities = load_places_for_state(state_id)
     if cities:
         selected_city = st.sidebar.selectbox("Select City", cities)
     else:
@@ -789,31 +847,13 @@ def landcover_percentages(aoi_geom, nlcd_img, custom_veg_codes=None, custom_urba
 # ----------------------------
 # MCD12Q1 (MODIS Land Cover) helpers — 500 m, annual, global, IGBP Type 1
 # ----------------------------
-@st.cache_data(show_spinner=False)
-def get_latest_mcd12q1_year() -> int:
-    """
-    Query GEE to find the latest available year in the MCD12Q1 collection.
-    Falls back to 2023 if the query fails.
-    """
-    try:
-        col = ee.ImageCollection("MODIS/061/MCD12Q1")
-        latest_date = col.aggregate_max("system:time_start")
-        latest_year = ee.Date(latest_date).get("year").getInfo()
-        return int(latest_year)
-    except Exception:
-        return 2023  # safe fallback
-
-
 def get_mcd12q1_for_year(year: int):
     """
-    Fetch MCD12Q1 for the requested year.
-    - If the exact year exists, use it.
-    - If not, use the latest available year <= requested year.
-    - Never goes below 2001 (collection start).
+    Fetch MODIS MCD12Q1 annual land cover (IGBP Type 1) for the given year.
+    Available 2001–present. Years before 2001 fall back to 2001.
+    Returns (ee.Image with 'LC_Type1' band, actual_year).
     """
-    latest_available = get_latest_mcd12q1_year()
-    actual_year = max(2001, min(year, latest_available))
-
+    actual_year = max(2001, min(year, 2023))  # clamp to available range
     img = (
         ee.ImageCollection("MODIS/061/MCD12Q1")
         .filter(ee.Filter.calendarRange(actual_year, actual_year, 'year'))
@@ -1750,7 +1790,12 @@ for key, default in [
 # ----------------------------
 if aoi_source == "County (US only)":
     st.subheader("AOI Preview (County)")
-    show_county_preview_map(states[selected_state], counties[selected_county])
+    if _CENSUS_API_DOWN:
+        st.info("ℹ️ Census API is unavailable. Switch to **Custom AOI** to continue.")
+    elif not counties:
+        st.warning("County list could not be loaded. Census API may be temporarily down.")
+    else:
+        show_county_preview_map(states[selected_state], counties[selected_county])
 
 elif aoi_source == "City (US only)":
     st.subheader("AOI Preview (City)")
