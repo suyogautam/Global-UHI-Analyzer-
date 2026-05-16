@@ -193,45 +193,67 @@ _FALLBACK_STATES = {
 }
 
 def _census_api_is_down():
-    """Returns True if the Census API was unreachable on this run."""
+    """Returns True if the last Census API call failed (no key or key invalid)."""
     return st.session_state.get("_census_api_down", False)
+
+def _get_census_key():
+    """Return the Census API key stored in session state, or empty string."""
+    return st.session_state.get("census_api_key", "").strip()
+
+def _census_key_missing():
+    """True if no Census API key has been entered."""
+    return _get_census_key() == ""
 
 def load_us_states_counties():
     """
-    Returns state name → FIPS dict.
-    Uses the Census ACS API; falls back to the hardcoded list if unavailable.
-    Never crashes — Census API downtime should not prevent app startup.
+    Returns state name → FIPS dict using Census ACS API.
+    Requires a Census API key stored in st.session_state["census_api_key"].
+    Falls back to the hardcoded list on any failure so the app never crashes.
     """
-    url = "https://api.census.gov/data/2019/acs/acs1?get=NAME&for=state:*"
+    key = _get_census_key()
+    if not key:
+        st.session_state["_census_api_down"] = True
+        return _FALLBACK_STATES
+
+    url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=state:*&key={key}"
     try:
+        import json as _json
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         text = r.text.strip()
         if not text.startswith("["):
             raise ValueError("Response is not JSON")
-        import json as _json
         data = _json.loads(text)
         if not isinstance(data, list) or len(data) < 2:
             raise ValueError("Unexpected format")
         st.session_state["_census_api_down"] = False
+        st.session_state["_census_key_invalid"] = False
         return {row[0]: row[1] for row in data[1:]}
-    except Exception:
+    except Exception as e:
         st.session_state["_census_api_down"] = True
+        # Flag invalid key if response suggests auth failure
+        err = str(e).lower()
+        if any(x in err for x in ["invalid", "unauthorized", "403", "key"]):
+            st.session_state["_census_key_invalid"] = True
         return _FALLBACK_STATES
 
 def load_counties(state_id: str):
     """
     Returns county name → FIPS dict for a given state FIPS.
-    Returns empty dict if Census API is unavailable.
+    Requires Census API key. Returns empty dict on failure.
     """
-    url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=county:*&in=state:{state_id}"
+    key = _get_census_key()
+    if not key:
+        return {}
+
+    url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=county:*&in=state:{state_id}&key={key}"
     try:
+        import json as _json
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         text = r.text.strip()
         if not text.startswith("["):
             raise ValueError("Response is not JSON")
-        import json as _json
         rows = _json.loads(text)
         if not isinstance(rows, list) or len(rows) < 2:
             raise ValueError("Unexpected format")
@@ -280,19 +302,54 @@ def load_places_for_state(state_fips: str):
 # ----------------------------
 st.sidebar.header("Analysis Parameters")
 
-# NEW: grouped AOI source
+# Census API key input — required for County and City AOI modes
+with st.sidebar.expander("🗝️ Census API Key", expanded=_census_key_missing()):
+    st.markdown(
+        "**County** and **City** AOI modes use the Census ACS API, "
+        "which now requires a free key. "
+        "**Custom AOI** (draw/upload) works without one."
+    )
+    _key_input = st.text_input(
+        "Census API Key",
+        value=st.session_state.get("census_api_key", ""),
+        type="password",
+        placeholder="Paste your Census API key here",
+        key="_census_key_widget"
+    )
+    if _key_input != st.session_state.get("census_api_key", ""):
+        st.session_state["census_api_key"] = _key_input
+        st.session_state.pop("_census_api_down", None)
+        st.session_state.pop("_census_key_invalid", None)
+        st.rerun()
+    if _census_key_missing():
+        st.caption(
+            "Get a free key (delivered by email instantly): "
+            "[api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html)"
+        )
+    elif st.session_state.get("_census_key_invalid"):
+        st.error("❌ Key invalid or rejected. Check for typos or re-request at "
+                 "[api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html)")
+    else:
+        st.success("✅ Census API key set.")
+
+# AOI source selector
 aoi_source = st.sidebar.radio("AOI Source", ["County (US only)", "City (US only)", "Custom AOI (US / Global)"], index=0)
 
 states = load_us_states_counties()
 aoi_mode = "County boundary"  # internal switch used by run_btn logic
 
-# Warn user if Census API was unreachable — County and City modes won't work
-if _census_api_is_down():
+# Show appropriate notice about Census key status
+if _census_key_missing():
+    st.info(
+        "ℹ️ **Census API key required for County and City modes.** "
+        "Enter your free key in the **🗝️ Census API Key** panel in the sidebar. "
+        "Get one at [api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html). "
+        "\n\n**Custom AOI** (draw or upload shapefile) works without a key and supports global areas."
+    )
+elif _census_api_is_down():
     st.warning(
-        "⚠️ **Census API is currently unavailable.** County and City AOI modes require the "
-        "Census Bureau API to fetch state/county lists and boundaries. "
-        "These modes are temporarily disabled.\n\n"
-        "**Use ‘Custom AOI (US / Global)’ to draw or upload your AOI and continue your analysis.**"
+        "⚠️ **Census API unreachable or key rejected.** "
+        "County and City modes are disabled. Check your key or use **Custom AOI** to continue."
     )
 
 # defaults
@@ -306,8 +363,11 @@ custom_aoi_mode = None
 
 if aoi_source == "County (US only)":
     aoi_mode = "County boundary"
-    if _census_api_is_down():
-        st.sidebar.error("❌ Census API unavailable — switch to Custom AOI.")
+    if _census_key_missing() or _census_api_is_down():
+        st.sidebar.error(
+            "❌ Census API key required. Enter your key in the "
+            "**🗝️ Census API Key** panel above, or switch to Custom AOI."
+        )
         counties = {}
     else:
         selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
@@ -321,8 +381,11 @@ if aoi_source == "County (US only)":
 
 elif aoi_source == "City (US only)":
     aoi_mode = "Draw AOI"  # city AOI will be provided via custom_aoi_geojson under the hood
-    if _census_api_is_down():
-        st.sidebar.error("❌ Census API unavailable — switch to Custom AOI.")
+    if _census_key_missing() or _census_api_is_down():
+        st.sidebar.error(
+            "❌ Census API key required. Enter your key in the "
+            "**🗝️ Census API Key** panel above, or switch to Custom AOI."
+        )
         cities = []
     else:
         selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
@@ -1805,8 +1868,12 @@ for key, default in [
 # ----------------------------
 if aoi_source == "County (US only)":
     st.subheader("AOI Preview (County)")
-    if _census_api_is_down():
-        st.info("ℹ️ Census API is unavailable. Switch to **Custom AOI** to continue.")
+    if _census_key_missing() or _census_api_is_down():
+        st.info(
+            "ℹ️ Enter your Census API key in the sidebar (**🗝️ Census API Key**) "
+            "to use County mode, or switch to **Custom AOI**. "
+            "Get a free key at [api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html)"
+        )
     elif not counties:
         st.warning("County list could not be loaded. Census API may be temporarily down.")
     else:
