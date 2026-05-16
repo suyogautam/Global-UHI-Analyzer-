@@ -204,7 +204,7 @@ def _census_key_missing():
     """True if no Census API key has been entered."""
     return _get_census_key() == ""
 
-def load_us_states_counties():
+def _fetch_states_from_census():
     """
     Returns (state_dict, api_ok: bool).
     Never writes to st.session_state — caller handles state.
@@ -229,7 +229,7 @@ def load_us_states_counties():
     except Exception:
         return _FALLBACK_STATES, False
 
-def load_counties(state_id: str):
+def _fetch_counties_from_census(state_id: str):
     """
     Returns county name → FIPS dict for a given state FIPS.
     Requires Census API key. Returns empty dict on failure.
@@ -327,7 +327,7 @@ with st.sidebar.expander("🗝️ Census API Key", expanded=_census_key_missing(
 aoi_source = st.sidebar.radio("AOI Source", ["County (US only)", "City (US only)", "Custom AOI (US / Global)"], index=0)
 
 try:
-    states, _census_ok = load_us_states_counties()
+    states, _census_ok = _fetch_states_from_census()
     st.session_state["_census_api_down"] = not _census_ok
     if _census_ok:
         st.session_state["_census_key_invalid"] = False
@@ -373,7 +373,7 @@ if aoi_source == "County (US only)":
     else:
         selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
         state_id = states[selected_state]
-        counties = load_counties(state_id)
+        counties = _fetch_counties_from_census(state_id)
         if not counties:
             st.sidebar.warning("⚠️ Could not load counties. Census API may be temporarily down.")
         else:
