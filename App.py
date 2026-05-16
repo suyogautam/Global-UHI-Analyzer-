@@ -206,36 +206,28 @@ def _census_key_missing():
 
 def load_us_states_counties():
     """
-    Returns state name → FIPS dict using Census ACS API.
-    Requires a Census API key stored in st.session_state["census_api_key"].
-    Falls back to the hardcoded list on any failure so the app never crashes.
+    Returns (state_dict, api_ok: bool).
+    Never writes to st.session_state — caller handles state.
+    Never raises — any failure returns the fallback list.
     """
+    import json as _json
     key = _get_census_key()
     if not key:
-        st.session_state["_census_api_down"] = True
-        return _FALLBACK_STATES
+        return _FALLBACK_STATES, False
 
     url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=state:*&key={key}"
     try:
-        import json as _json
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         text = r.text.strip()
         if not text.startswith("["):
-            raise ValueError("Response is not JSON")
+            return _FALLBACK_STATES, False
         data = _json.loads(text)
         if not isinstance(data, list) or len(data) < 2:
-            raise ValueError("Unexpected format")
-        st.session_state["_census_api_down"] = False
-        st.session_state["_census_key_invalid"] = False
-        return {row[0]: row[1] for row in data[1:]}
-    except Exception as e:
-        st.session_state["_census_api_down"] = True
-        # Flag invalid key if response suggests auth failure
-        err = str(e).lower()
-        if any(x in err for x in ["invalid", "unauthorized", "403", "key"]):
-            st.session_state["_census_key_invalid"] = True
-        return _FALLBACK_STATES
+            return _FALLBACK_STATES, False
+        return {row[0]: row[1] for row in data[1:]}, True
+    except Exception:
+        return _FALLBACK_STATES, False
 
 def load_counties(state_id: str):
     """
@@ -266,7 +258,6 @@ def load_counties(state_id: str):
     except Exception:
         return {}
 
-@st.cache_data(show_spinner=False)
 def load_places_for_state(state_fips: str):
     """
     Load city names using Census Tiger/Line 2023 Places.
@@ -335,7 +326,17 @@ with st.sidebar.expander("🗝️ Census API Key", expanded=_census_key_missing(
 # AOI source selector
 aoi_source = st.sidebar.radio("AOI Source", ["County (US only)", "City (US only)", "Custom AOI (US / Global)"], index=0)
 
-states = load_us_states_counties()
+try:
+    states, _census_ok = load_us_states_counties()
+    st.session_state["_census_api_down"] = not _census_ok
+    if _census_ok:
+        st.session_state["_census_key_invalid"] = False
+    elif _get_census_key():
+        # Had a key but API call failed — likely invalid key
+        st.session_state["_census_key_invalid"] = True
+except Exception:
+    states = _FALLBACK_STATES
+    st.session_state["_census_api_down"] = True
 aoi_mode = "County boundary"  # internal switch used by run_btn logic
 
 # Show appropriate notice about Census key status
