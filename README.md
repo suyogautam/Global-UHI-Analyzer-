@@ -92,6 +92,7 @@ Click **Run Analysis**. Processing typically takes 1–5 minutes depending on AO
 
 ---
 
+
 ## Local Setup
 
 Run the app on your own machine for development or offline use.
@@ -134,41 +135,6 @@ ee_folium_map.py       # Folium map wrapper (replaces geemap.foliumap for cloud 
 validation_era5.py     # ERA5-Land validation tab
 requirements.txt       # Python dependencies
 ```
-
----
-
-## Data Sources
-
-| Data | Source | Resolution | Coverage |
-|---|---|---|---|
-| Landsat LST + SR | USGS Landsat Collection 2 Level-2 (`LANDSAT/LT05`, `LC08`, `LC09`) | 30 m | US-focused, 2000–present |
-| MODIS Daytime LST | MOD11A1 + MYD11A1 merged | 1 km | Global, 2000–present |
-| MODIS Nighttime LST | MOD11A1 + MYD11A1 merged | 1 km | Global, 2000–present |
-| MODIS Surface Reflectance | MOD09GA | 500 m | Global, 2000–present |
-| NLCD Land Cover | USGS NLCD Releases 2019/2021 | 30 m | US only, biennial |
-| MODIS Land Cover | MCD12Q1 IGBP Type 1 | 500 m | Global, annual 2001–present |
-| ERA5-Land | ECMWF ERA5-Land Monthly Aggregated | ~11 km | Global |
-| County/City Boundaries | US Census Bureau TIGER/Line 2023 | — | US only |
-
----
-
-## Methodology Notes
-
-**Hottest month selection** — For each year, the app computes the AOI-median LST for every month in the selected set and picks the month with the highest value. This ensures UHI metrics are always derived from peak thermal conditions rather than a fixed calendar month.
-
-**Outlier filtering (Landsat)** — LST values are clipped to the 5th–95th percentile within the AOI before statistics are computed, reducing the effect of cloud/shadow residuals.
-
-**UHI intensity** — Defined as the difference between median LST over urban pixels and median LST over vegetated pixels, using NLCD or MCD12Q1 land cover to define both classes. Cropland (NLCD class 82) and open water (class 11) are excluded from the vegetated reference.
-
-**Trend analysis** — Sen's slope and Mann–Kendall test are applied separately to the original annual time series and the 3-year centered moving average. Both slope and p-value are reported and included in exports.
-
-**Spectral indices**
-
-| Index | Formula | Bands (L8/L9) | Bands (L5/L7) |
-|---|---|---|---|
-| NDVI | (NIR − Red) / (NIR + Red) | B5, B4 | B4, B3 |
-| NDMI | (NIR − SWIR1) / (NIR + SWIR1) | B5, B6 | B4, B5 |
-| NDBI | (SWIR1 − NIR) / (SWIR1 + NIR) | B6, B5 | B5, B4 |
 
 
 ## Developer
