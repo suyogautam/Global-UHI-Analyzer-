@@ -175,7 +175,7 @@ if not render_auth_gate():
 # Census helpers
 # ----------------------------
 
-# Hardcoded fallback — used when the Census API is unreachable
+# All 50 states + DC with FIPS codes — no API needed for this list
 _FALLBACK_STATES = {
     "Alabama": "01", "Alaska": "02", "Arizona": "04", "Arkansas": "05",
     "California": "06", "Colorado": "08", "Connecticut": "09", "Delaware": "10",
@@ -192,32 +192,47 @@ _FALLBACK_STATES = {
     "Wisconsin": "55", "Wyoming": "56", "District of Columbia": "11",
 }
 
-# Hardcoded county fallback — empty dict signals Census API is down
-_CENSUS_API_DOWN = False  # module-level flag set by load_us_states_counties
+def _census_api_is_down():
+    """Returns True if the Census API was unreachable on this run."""
+    return st.session_state.get("_census_api_down", False)
 
-@st.cache_data(show_spinner=False)
 def load_us_states_counties():
-    global _CENSUS_API_DOWN
+    """
+    Returns state name → FIPS dict.
+    Uses the Census ACS API; falls back to the hardcoded list if unavailable.
+    Never crashes — Census API downtime should not prevent app startup.
+    """
     url = "https://api.census.gov/data/2019/acs/acs1?get=NAME&for=state:*"
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        data = r.json()
+        text = r.text.strip()
+        if not text.startswith("["):
+            raise ValueError("Response is not JSON")
+        import json as _json
+        data = _json.loads(text)
         if not isinstance(data, list) or len(data) < 2:
             raise ValueError("Unexpected format")
-        _CENSUS_API_DOWN = False
+        st.session_state["_census_api_down"] = False
         return {row[0]: row[1] for row in data[1:]}
     except Exception:
-        _CENSUS_API_DOWN = True
+        st.session_state["_census_api_down"] = True
         return _FALLBACK_STATES
 
-@st.cache_data(show_spinner=False)
 def load_counties(state_id: str):
+    """
+    Returns county name → FIPS dict for a given state FIPS.
+    Returns empty dict if Census API is unavailable.
+    """
     url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=county:*&in=state:{state_id}"
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
-        rows = r.json()
+        text = r.text.strip()
+        if not text.startswith("["):
+            raise ValueError("Response is not JSON")
+        import json as _json
+        rows = _json.loads(text)
         if not isinstance(rows, list) or len(rows) < 2:
             raise ValueError("Unexpected format")
         counties = {}
@@ -227,7 +242,7 @@ def load_counties(state_id: str):
             counties[full.split(",")[0]] = cid
         return counties
     except Exception:
-        return {}  # empty dict — County/City modes will be disabled
+        return {}
 
 @st.cache_data(show_spinner=False)
 def load_places_for_state(state_fips: str):
@@ -272,7 +287,7 @@ states = load_us_states_counties()
 aoi_mode = "County boundary"  # internal switch used by run_btn logic
 
 # Warn user if Census API was unreachable — County and City modes won't work
-if _CENSUS_API_DOWN:
+if _census_api_is_down():
     st.warning(
         "⚠️ **Census API is currently unavailable.** County and City AOI modes require the "
         "Census Bureau API to fetch state/county lists and boundaries. "
@@ -291,7 +306,7 @@ custom_aoi_mode = None
 
 if aoi_source == "County (US only)":
     aoi_mode = "County boundary"
-    if _CENSUS_API_DOWN:
+    if _census_api_is_down():
         st.sidebar.error("❌ Census API unavailable — switch to Custom AOI.")
         counties = {}
     else:
@@ -306,7 +321,7 @@ if aoi_source == "County (US only)":
 
 elif aoi_source == "City (US only)":
     aoi_mode = "Draw AOI"  # city AOI will be provided via custom_aoi_geojson under the hood
-    if _CENSUS_API_DOWN:
+    if _census_api_is_down():
         st.sidebar.error("❌ Census API unavailable — switch to Custom AOI.")
         cities = []
     else:
@@ -1790,7 +1805,7 @@ for key, default in [
 # ----------------------------
 if aoi_source == "County (US only)":
     st.subheader("AOI Preview (County)")
-    if _CENSUS_API_DOWN:
+    if _census_api_is_down():
         st.info("ℹ️ Census API is unavailable. Switch to **Custom AOI** to continue.")
     elif not counties:
         st.warning("County list could not be loaded. Census API may be temporarily down.")
