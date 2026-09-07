@@ -2257,8 +2257,10 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
 
         cols_day = ['Year','Month','Satellite','LC_Source','Image_Date','Urban','Vegetative','UHI','Mean_LST',
                     'Mean_NDVI','Mean_NDMI','Mean_NDBI','Urban_Percent','Vegetative_Percent','Other_Percent',
-                    'LC_Source','LC_Year','UHI_MA_SenSlope_Day','UHI_MA_p_Day']
-        cols_day = [c for c in cols_day if c in display_df.columns]  # skip missing cols gracefully
+                    'LC_Year','UHI_MA_SenSlope_Day','UHI_MA_p_Day']
+        # dict.fromkeys drops any repeat: duplicate column names make pandas
+        # raise when the frame is handed to st.dataframe / pyarrow.
+        cols_day = [c for c in dict.fromkeys(cols_day) if c in display_df.columns]
         st.markdown("**Daytime (primary)**")
         st.dataframe(display_df[cols_day], use_container_width=True)
 
@@ -2294,7 +2296,7 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
             cols_n = ['Year','Month','Satellite','LC_Source','Image_Date','Urban','Vegetative','UHI','Mean_LST',
                       'Urban_Percent','Vegetative_Percent','Other_Percent','LC_Year',
                       'UHI_MA_SenSlope_Night','UHI_MA_p_Night']
-            cols_n = [c for c in cols_n if c in display_n.columns]
+            cols_n = [c for c in dict.fromkeys(cols_n) if c in display_n.columns]
             st.dataframe(display_n[cols_n], use_container_width=True)
 
             csv_n = display_n[cols_n].to_csv(index=False).encode('utf-8')
