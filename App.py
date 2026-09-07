@@ -70,10 +70,10 @@ Analyze UHI for **any U.S. county**, a **city**, or a **custom drawn/uploaded AO
 9. **UHI = urban median LST − vegetated median LST.** Area percentages computed from pixel counts.
 
 ### MODIS pipeline (1 km · Terra + Aqua merged)
-1. **Daytime LST:** `MOD11A1` + `MYD11A1` merged, `LST_Day_1km` band, QC-filtered, scaled to °C, monthly median.
+1. **Daytime LST:** `MOD11A1` (Terra) and/or `MYD11A1` (Aqua) per the **MODIS platform** selector — combined by default — `LST_Day_1km` band, QC-filtered, scaled to °C, monthly median.
 2. **Hottest month selection:** Highest AOI-median daytime LST.
 3. **Nighttime LST:** Same hottest month, `LST_Night_1km`, same QC and scale logic.
-4. **Spectral indices (day):** `MOD09GA` surface reflectance (× 0.0001), monthly median → NDVI, NDMI, NDBI.
+4. **Spectral indices (day):** `MOD09GA` (Terra) or `MYD09GA` (Aqua-only mode) surface reflectance (× 0.0001), monthly median → NDVI, NDMI, NDBI.
 5. **Land cover:** NLCD (US-only) or MODIS MCD12Q1 IGBP (`MODIS/061/MCD12Q1`, annual 2001–present, global). Urban = class 13; Vegetated = classes 1–10 (forests, shrublands, savannas, grasslands).
 6. **UHI** computed for both day and night using the same urban/vegetated separation.
 
@@ -192,29 +192,33 @@ _FALLBACK_STATES = {
     "Wisconsin": "55", "Wyoming": "56", "District of Columbia": "11",
 }
 
-def _census_api_is_down():
-    """Returns True if the last Census API call failed (no key or key invalid)."""
-    return st.session_state.get("_census_api_down", False)
+# TIGER/Line and cartographic-boundary files are plain downloads from
+# www2.census.gov and need NO API key. The ACS API (api.census.gov) is used
+# only as an optional source of county names; every call is cached so a
+# rerun does not hammer it, and any failure falls back to the TIGER file.
 
 def _get_census_key():
     """Return the Census API key stored in session state, or empty string."""
     return st.session_state.get("census_api_key", "").strip()
 
 def _census_key_missing():
-    """True if no Census API key has been entered."""
+    """True if no Census API key has been entered. Nothing is gated on this."""
     return _get_census_key() == ""
 
-def _fetch_states_from_census():
+def _census_api_is_down():
+    """Kept for backwards compatibility; no feature depends on it any more."""
+    return st.session_state.get("_census_api_down", False)
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_states_from_census(key: str):
     """
-    Returns (state_dict, api_ok: bool).
-    Never writes to st.session_state — caller handles state.
-    Never raises — any failure returns the fallback list.
+    Returns (state_dict, api_ok). The 51 state FIPS codes never change, so the
+    hard-coded list is authoritative; the API call only reports reachability.
+    Cached for a day and keyed on the API key so reruns cost nothing.
     """
     import json as _json
-    key = _get_census_key()
     if not key:
         return _FALLBACK_STATES, False
-
     url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=state:*&key={key}"
     try:
         r = requests.get(url, timeout=10)
@@ -229,76 +233,130 @@ def _fetch_states_from_census():
     except Exception:
         return _FALLBACK_STATES, False
 
-def _fetch_counties_from_census(state_id: str):
+@st.cache_data(ttl=86400, show_spinner=False)
+def _tiger_counties_all():
     """
-    Returns county name → FIPS dict for a given state FIPS.
-    Requires Census API key. Returns empty dict on failure.
+    Every US county from the Census cartographic boundary file, as
+    {state FIPS: {county name: county FIPS}}. No API key, no rate limit.
+    Downloaded and parsed once per day, then served from cache for all states.
     """
-    key = _get_census_key()
+    url = "https://www2.census.gov/geo/tiger/GENZ2022/shp/cb_2022_us_county_5m.zip"
+    try:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+            with tempfile.TemporaryDirectory() as tmp:
+                z.extractall(tmp)
+                shp = [f for f in os.listdir(tmp) if f.endswith(".shp")][0]
+                gdf = gpd.read_file(os.path.join(tmp, shp))
+    except Exception:
+        return {}
+    name_col = "NAMELSAD" if "NAMELSAD" in gdf.columns else "NAME"
+    out = {}
+    for _, row in gdf.sort_values(name_col).iterrows():
+        sfp = str(row["STATEFP"]).zfill(2)
+        out.setdefault(sfp, {})[row[name_col]] = str(row["COUNTYFP"]).zfill(3)
+    return out
+
+def _counties_from_tiger(state_fips: str):
+    """County name -> FIPS for one state, from the cached national table."""
+    return _tiger_counties_all().get(str(state_fips).zfill(2), {})
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _counties_from_acs(state_fips: str, key: str):
+    """County name -> FIPS from the ACS API. Empty dict on any failure."""
     if not key:
         return {}
-
-    url = f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=county:*&in=state:{state_id}&key={key}"
+    import json as _json
+    url = (f"https://api.census.gov/data/2019/acs/acs1?get=NAME&for=county:*"
+           f"&in=state:{state_fips}&key={key}")
     try:
-        import json as _json
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         text = r.text.strip()
         if not text.startswith("["):
-            raise ValueError("Response is not JSON")
+            return {}
         rows = _json.loads(text)
         if not isinstance(rows, list) or len(rows) < 2:
-            raise ValueError("Unexpected format")
-        counties = {}
-        for row in rows[1:]:
-            full = row[0]
-            cid = str(row[-1])
-            counties[full.split(",")[0]] = cid
-        return counties
+            return {}
+        return {row[0].split(",")[0]: str(row[-1]).zfill(3) for row in rows[1:]}
     except Exception:
         return {}
 
+def _fetch_counties_from_census(state_id: str):
+    """
+    County list for a state. Tries the ACS API when a key is present, then
+    falls back to the TIGER boundary file, which always works without a key.
+    """
+    counties = _counties_from_acs(str(state_id).zfill(2), _get_census_key())
+    if counties:
+        return counties
+    return _counties_from_tiger(state_id)
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_places_for_state(state_fips: str):
     """
-    Load city names using Census Tiger/Line 2023 Places.
-    Stable, permanent URL from Census Bureau.
+    City names from Census TIGER/Line 2023 Places. No API key required.
+    Cached for a day: without the cache this ~10-50 MB shapefile was
+    re-downloaded on every Streamlit rerun.
     """
-    import requests, geopandas as gpd, zipfile, tempfile, os, io
-
-    # Use Tiger/Line 2023 (most recent stable version)
-    url = f"https://www2.census.gov/geo/tiger/TIGER2023/PLACE/tl_2023_{state_fips.zfill(2)}_place.zip"
-    
+    url = (f"https://www2.census.gov/geo/tiger/TIGER2023/PLACE/"
+           f"tl_2023_{str(state_fips).zfill(2)}_place.zip")
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(url, timeout=60)
         r.raise_for_status()
     except Exception as e:
-        st.warning(f"Could not download Census data: {e}")
+        st.warning(f"Could not download Census place boundaries: {e}")
         return []
-
     try:
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             with tempfile.TemporaryDirectory() as tmp:
                 z.extractall(tmp)
                 shp = [f for f in os.listdir(tmp) if f.endswith(".shp")][0]
                 gdf = gpd.read_file(os.path.join(tmp, shp))
-        
-        # Get unique place names, sorted
-        names = sorted(gdf["NAME"].unique())
-        return names
+        return sorted(gdf["NAME"].unique())
     except Exception as e:
-        st.warning(f"Could not parse shapefile: {e}")
+        st.warning(f"Could not parse place shapefile: {e}")
         return []
+
+# ----------------------------
+# Basemaps (no API key)
+# ----------------------------
+def base_folium_map(center, zoom: int = 9):
+    """
+    Folium map with key-free basemaps. CARTO now watermarks its tiles with
+    "API KEY REQUIRED", so OpenStreetMap is the default and Esri layers are
+    offered as alternatives; none of them need a token.
+    """
+    m = folium.Map(location=center, zoom_start=zoom, tiles=None, control_scale=True)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri", name="Esri Light Gray", overlay=False, control=True
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri — Esri, Maxar, Earthstar Geographics",
+        name="Esri World Imagery", overlay=False, control=True
+    ).add_to(m)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+        attr="Tiles &copy; Esri", name="Esri Topographic", overlay=False, control=True
+    ).add_to(m)
+    return m
+
 # ----------------------------
 # Sidebar controls
 # ----------------------------
 st.sidebar.header("Analysis Parameters")
 
-# Census API key input — required for County and City AOI modes
-with st.sidebar.expander("🗝️ Census API Key", expanded=_census_key_missing()):
+# Census API key input — OPTIONAL. County and City modes fall back to the
+# Census TIGER boundary files, which need no key.
+with st.sidebar.expander("🗝️ Census API Key (optional)", expanded=False):
     st.markdown(
-        "**County** and **City** AOI modes use the Census ACS API, "
-        "which now requires a free key. "
-        "**Custom AOI** (draw/upload) works without one."
+        "A key is **not required**. County and City modes read Census "
+        "TIGER/Line boundary files directly. A key only switches the county "
+        "name list to the ACS API."
     )
     _key_input = st.text_input(
         "Census API Key",
@@ -314,44 +372,29 @@ with st.sidebar.expander("🗝️ Census API Key", expanded=_census_key_missing(
         st.rerun()
     if _census_key_missing():
         st.caption(
-            "Get a free key (delivered by email instantly): "
+            "Optional free key: "
             "[api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html)"
         )
     elif st.session_state.get("_census_key_invalid"):
-        st.error("❌ Key invalid or rejected. Check for typos or re-request at "
-                 "[api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html)")
+        st.warning("Key not accepted by the ACS API. County names will come "
+                   "from the TIGER boundary file instead, which works fine.")
     else:
         st.success("✅ Census API key set.")
 
 # AOI source selector
 aoi_source = st.sidebar.radio("AOI Source", ["County (US only)", "City (US only)", "Custom AOI (US / Global)"], index=0)
 
+# State list: the hard-coded FIPS table is always used. The cached API call
+# only reports whether an entered key works; nothing depends on the result.
 try:
-    states, _census_ok = _fetch_states_from_census()
+    _api_states, _census_ok = _fetch_states_from_census(_get_census_key())
     st.session_state["_census_api_down"] = not _census_ok
-    if _census_ok:
-        st.session_state["_census_key_invalid"] = False
-    elif _get_census_key():
-        # Had a key but API call failed — likely invalid key
-        st.session_state["_census_key_invalid"] = True
+    st.session_state["_census_key_invalid"] = bool(_get_census_key()) and not _census_ok
 except Exception:
-    states = _FALLBACK_STATES
+    _census_ok = False
     st.session_state["_census_api_down"] = True
+states = _FALLBACK_STATES
 aoi_mode = "County boundary"  # internal switch used by run_btn logic
-
-# Show appropriate notice about Census key status
-if _census_key_missing():
-    st.info(
-        "ℹ️ **Census API key required for County and City modes.** "
-        "Enter your free key in the **🗝️ Census API Key** panel in the sidebar. "
-        "Get one at [api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html). "
-        "\n\n**Custom AOI** (draw or upload shapefile) works without a key and supports global areas."
-    )
-elif _census_api_is_down():
-    st.warning(
-        "⚠️ **Census API unreachable or key rejected.** "
-        "County and City modes are disabled. Check your key or use **Custom AOI** to continue."
-    )
 
 # defaults
 selected_state = "Custom"
@@ -364,33 +407,24 @@ custom_aoi_mode = None
 
 if aoi_source == "County (US only)":
     aoi_mode = "County boundary"
-    if _census_key_missing() or _census_api_is_down():
-        st.sidebar.error(
-            "❌ Census API key required. Enter your key in the "
-            "**🗝️ Census API Key** panel above, or switch to Custom AOI."
-        )
-        counties = {}
-    else:
-        selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
-        state_id = states[selected_state]
+    selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
+    state_id = states[selected_state]
+    with st.spinner("Loading county list…"):
         counties = _fetch_counties_from_census(state_id)
-        if not counties:
-            st.sidebar.warning("⚠️ Could not load counties. Census API may be temporarily down.")
-        else:
-            selected_county = st.sidebar.selectbox("Select County", list(counties.keys()))
-            county_id = counties[selected_county]
+    if not counties:
+        st.sidebar.warning(
+            "⚠️ Could not load the county list. Check your internet connection, "
+            "or use Custom AOI."
+        )
+    else:
+        selected_county = st.sidebar.selectbox("Select County", list(counties.keys()))
+        county_id = counties[selected_county]
 
 elif aoi_source == "City (US only)":
     aoi_mode = "Draw AOI"  # city AOI will be provided via custom_aoi_geojson under the hood
-    if _census_key_missing() or _census_api_is_down():
-        st.sidebar.error(
-            "❌ Census API key required. Enter your key in the "
-            "**🗝️ Census API Key** panel above, or switch to Custom AOI."
-        )
-        cities = []
-    else:
-        selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
-        state_id = states[selected_state]
+    selected_state = st.sidebar.selectbox("Select State", list(states.keys()))
+    state_id = states[selected_state]
+    with st.spinner("Loading city list…"):
         cities = load_places_for_state(state_id)
     if cities:
         selected_city = st.sidebar.selectbox("Select City", cities)
@@ -424,6 +458,25 @@ source = st.sidebar.radio(
     index=0,
     help="Landsat gives 30 m spatial resolution (US-focused). MODIS gives 1 km with global coverage."
 )
+
+# MODIS platform: Terra (MOD, ~10:30/22:30 local) and Aqua (MYD, ~13:30/01:30).
+# Both merged is the default; running them separately is the standard check for
+# orbital-drift artifacts in long LST records.
+if source.startswith("MODIS"):
+    modis_platform = st.sidebar.radio(
+        "MODIS platform",
+        ["Terra + Aqua (combined)", "Terra only (MOD)", "Aqua only (MYD)"],
+        index=0,
+        key="modis_platform",
+        help=(
+            "Terra overpass ~10:30 day / 22:30 night, Aqua ~13:30 day / 01:30 night. "
+            "Combining both gives the most observations; running each separately "
+            "tests whether a trend is affected by orbital drift. "
+            "Aqua starts in mid-2002, so 2000-2002 will be empty in Aqua-only mode."
+        )
+    )
+else:
+    modis_platform = "Terra + Aqua (combined)"
 
 # ════════════════════════════════════════════════════════
 # ②  TIME PERIOD
@@ -724,15 +777,7 @@ def build_draw_aoi_ui():
     st.subheader("Draw an AOI (polygon) on the map")
 
     # US basemap
-    m = folium.Map(location=[39.0, -98.0], zoom_start=4,
-                   tiles='cartodbpositron', control_scale=True)
-    folium.TileLayer('openstreetmap', name='OpenStreetMap').add_to(m)
-    folium.TileLayer(
-        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-        attr='&copy; Esri — Esri, Maxar, Earthstar Geographics, and the GIS User Community',
-        name='Esri World Imagery', overlay=False, control=True
-    ).add_to(m)
-    folium.TileLayer('cartodbdark_matter', name='CartoDB Dark Matter').add_to(m)
+    m = base_folium_map([39.0, -98.0], zoom=4)
 
     Fullscreen().add_to(m)
     MousePosition(position='bottomright', separator=' | ', empty_string='NaN', prefix='Lat/Lng:').add_to(m)
@@ -783,7 +828,7 @@ def show_county_preview_map(state_id: str, county_id: str):
         st.warning("Could not load county geometry for preview.")
         return
     center = [gdf_ll.geometry.centroid.y.mean(), gdf_ll.geometry.centroid.x.mean()]
-    m = folium.Map(location=center, zoom_start=9, tiles='cartodbpositron', control_scale=True)
+    m = base_folium_map(center, zoom=9)
     folium.GeoJson(
         gdf_ll.__geo_interface__,
         name="County boundary",
@@ -926,13 +971,22 @@ def landcover_percentages(aoi_geom, nlcd_img, custom_veg_codes=None, custom_urba
 # ----------------------------
 # MCD12Q1 (MODIS Land Cover) helpers — 500 m, annual, global, IGBP Type 1
 # ----------------------------
+@st.cache_data(ttl=86400, show_spinner=False)
+def _mcd12q1_last_year() -> int:
+    """Latest year present in MODIS/061/MCD12Q1, queried once and cached."""
+    try:
+        t = ee.ImageCollection("MODIS/061/MCD12Q1").aggregate_max('system:time_start').getInfo()
+        return datetime.utcfromtimestamp(t / 1000.0).year
+    except Exception:
+        return 2023
+
 def get_mcd12q1_for_year(year: int):
     """
     Fetch MODIS MCD12Q1 annual land cover (IGBP Type 1) for the given year.
     Available 2001–present. Years before 2001 fall back to 2001.
     Returns (ee.Image with 'LC_Type1' band, actual_year).
     """
-    actual_year = max(2001, min(year, 2023))  # clamp to available range
+    actual_year = max(2001, min(year, _mcd12q1_last_year()))  # clamp to what exists
     img = (
         ee.ImageCollection("MODIS/061/MCD12Q1")
         .filter(ee.Filter.calendarRange(actual_year, actual_year, 'year'))
@@ -1337,7 +1391,8 @@ def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_
         'UHI': uhi_val,
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
         'Satellite': sat_label,
-        'NLCD_Year': nlcd_year,
+        'LC_Source': f"NLCD-{nlcd_year}",
+        'LC_Year': nlcd_year,
         'EE_Images': {'LST': lst_filtered, 'NDVI': ndvi, 'NDMI': ndmi, 'NDBI': ndbi,
                       'LC': nlcd, 'LC_TYPE': 'NLCD', 'UHI': uhi_img}
     }
@@ -1351,25 +1406,51 @@ def _scale_mask_modis_lst(img, lst_band: str, qc_band: str):
     good = qc.bitwiseAnd(3).lt(2)
     return img.select(lst_band).updateMask(good).multiply(0.02).subtract(273.15).rename('LST')
 
-def modis_lst_day_median(year: int, month: int, aoi: ee.FeatureCollection):
-    start = ee.Date.fromYMD(year, month, 1); end = start.advance(1, 'month')
-    terra = ee.ImageCollection('MODIS/061/MOD11A1').filterDate(start, end)\
-        .map(lambda i: _scale_mask_modis_lst(i, 'LST_Day_1km', 'QC_Day'))
-    aqua  = ee.ImageCollection('MODIS/061/MYD11A1').filterDate(start, end)\
-        .map(lambda i: _scale_mask_modis_lst(i, 'LST_Day_1km', 'QC_Day'))
-    return terra.merge(aqua).median().clip(aoi)
+def _modis_platform_flags(platform: str):
+    """('Terra + Aqua (combined)'|'Terra only (MOD)'|'Aqua only (MYD)') -> (use_terra, use_aqua)."""
+    p = (platform or "").lower()
+    if p.startswith("terra only"):
+        return True, False
+    if p.startswith("aqua only"):
+        return False, True
+    return True, True
 
-def modis_lst_night_median(year: int, month: int, aoi: ee.FeatureCollection):
-    start = ee.Date.fromYMD(year, month, 1); end = start.advance(1, 'month')
-    terra = ee.ImageCollection('MODIS/061/MOD11A1').filterDate(start, end)\
-        .map(lambda i: _scale_mask_modis_lst(i, 'LST_Night_1km', 'QC_Night'))
-    aqua  = ee.ImageCollection('MODIS/061/MYD11A1').filterDate(start, end)\
-        .map(lambda i: _scale_mask_modis_lst(i, 'LST_Night_1km', 'QC_Night'))
-    return terra.merge(aqua).median().clip(aoi)
+def _modis_label(platform: str):
+    use_terra, use_aqua = _modis_platform_flags(platform)
+    if use_terra and use_aqua:
+        return 'MODIS Terra+Aqua'
+    return 'MODIS Terra' if use_terra else 'MODIS Aqua'
 
-def modis_indices_median(year: int, month: int, aoi: ee.FeatureCollection):
+def _modis_lst_median(year: int, month: int, aoi: ee.FeatureCollection,
+                      lst_band: str, qc_band: str, platform: str = "Terra + Aqua (combined)"):
     start = ee.Date.fromYMD(year, month, 1); end = start.advance(1, 'month')
-    sr = (ee.ImageCollection('MODIS/061/MOD09GA')
+    use_terra, use_aqua = _modis_platform_flags(platform)
+    cols = []
+    if use_terra:
+        cols.append(ee.ImageCollection('MODIS/061/MOD11A1').filterDate(start, end)
+                    .map(lambda i: _scale_mask_modis_lst(i, lst_band, qc_band)))
+    if use_aqua:
+        cols.append(ee.ImageCollection('MODIS/061/MYD11A1').filterDate(start, end)
+                    .map(lambda i: _scale_mask_modis_lst(i, lst_band, qc_band)))
+    merged = cols[0] if len(cols) == 1 else cols[0].merge(cols[1])
+    return merged.median().clip(aoi)
+
+def modis_lst_day_median(year: int, month: int, aoi: ee.FeatureCollection,
+                         platform: str = "Terra + Aqua (combined)"):
+    return _modis_lst_median(year, month, aoi, 'LST_Day_1km', 'QC_Day', platform)
+
+def modis_lst_night_median(year: int, month: int, aoi: ee.FeatureCollection,
+                           platform: str = "Terra + Aqua (combined)"):
+    return _modis_lst_median(year, month, aoi, 'LST_Night_1km', 'QC_Night', platform)
+
+def modis_indices_median(year: int, month: int, aoi: ee.FeatureCollection,
+                         platform: str = "Terra + Aqua (combined)"):
+    start = ee.Date.fromYMD(year, month, 1); end = start.advance(1, 'month')
+    use_terra, _use_aqua = _modis_platform_flags(platform)
+    # Surface reflectance follows the chosen platform: MOD09GA (Terra) or
+    # MYD09GA (Aqua). Combined mode keeps Terra, as before.
+    _sr_id = 'MODIS/061/MOD09GA' if use_terra else 'MODIS/061/MYD09GA'
+    sr = (ee.ImageCollection(_sr_id)
           .filterDate(start, end).filterBounds(aoi)
           .select(['sur_refl_b01','sur_refl_b02','sur_refl_b06'],
                   ['red',         'nir',          'swir1'])     # ← b06 = SWIR1 (1628–1652 nm) ✓
@@ -1381,12 +1462,12 @@ def modis_indices_median(year: int, month: int, aoi: ee.FeatureCollection):
         return ee.Image.cat([ndvi, ndmi, ndbi])
     return sr.map(add_index).median().clip(aoi)
 
-def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, months: list[str], custom_veg_codes=None, custom_urban_codes=None, use_mcd12q1: bool = False):
+def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, months: list[str], custom_veg_codes=None, custom_urban_codes=None, use_mcd12q1: bool = False, platform: str = "Terra + Aqua (combined)"):
     """Returns (rec_day, best_month_int, lst_img_for_best_month)."""
     month_numbers = [int(m.split('-')[0]) for m in months]
     temps, lst_by_m = [], {}
     for m in month_numbers:
-        lst_img = modis_lst_day_median(year, m, aoi)
+        lst_img = modis_lst_day_median(year, m, aoi, platform)
         try:
             t = lst_img.reduceRegion(ee.Reducer.median(), aoi, 1000, maxPixels=1e9, bestEffort=True)\
                        .get('LST').getInfo()
@@ -1399,7 +1480,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         return None, None, None
 
     _, best_m = max(temps, key=lambda x: x[0])
-    index_img = modis_indices_median(year, best_m, aoi)
+    index_img = modis_indices_median(year, best_m, aoi, platform)
     stats_idx = index_img.reduceRegion(ee.Reducer.median(), aoi, 1000, maxPixels=1e9, bestEffort=True).getInfo()
     ndvi = stats_idx.get('NDVI'); ndmi = stats_idx.get('NDMI'); ndbi = stats_idx.get('NDBI')
 
@@ -1434,7 +1515,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         'Year': year,
         'Month': f"{best_m:02d}",
         'Image_Date': f"{year}-{best_m:02d}-15",
-        'Satellite': 'MODIS',
+        'Satellite': _modis_label(platform),
         'LC_Source': lc_label,
         'Urban': round(urban_t, 2),
         'Vegetative': round(rural_t, 2),
@@ -1444,7 +1525,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         'Mean_NDBI': round(ndbi, 4) if ndbi is not None else None,
         'UHI': round(urban_t - rural_t, 2),
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
-        'NLCD_Year': lc_year,
+        'LC_Year': lc_year,
         'EE_Images': {'LST': lst_img, 'NDVI': index_img.select('NDVI'),
                       'NDMI': index_img.select('NDMI'), 'NDBI': index_img.select('NDBI'),
                       'LC': lc_img, 'LC_TYPE': 'MCD12Q1' if use_mcd12q1 else 'NLCD',
@@ -1452,7 +1533,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
     }
     return rec_day, best_m, lst_img
 
-def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: int, custom_veg_codes=None, custom_urban_codes=None, use_mcd12q1: bool = False):
+def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: int, custom_veg_codes=None, custom_urban_codes=None, use_mcd12q1: bool = False, platform: str = "Terra + Aqua (combined)"):
     """Nighttime LST computed using the SAME hottest month determined by daytime."""
     if use_mcd12q1:
         lc_img, lc_year = get_mcd12q1_for_year(year)
@@ -1461,7 +1542,7 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
         lc_img, lc_year = get_best_nlcd_for_year(year)
         urban_m, veg_m  = nlcd_masks(lc_img, custom_veg_codes, custom_urban_codes)
 
-    lst_img_n  = modis_lst_night_median(year, best_m, aoi)
+    lst_img_n  = modis_lst_night_median(year, best_m, aoi, platform)
     urban_t    = lst_img_n.updateMask(urban_m).reduceRegion(ee.Reducer.median(), aoi, 1000, maxPixels=1e9, bestEffort=True).get('LST').getInfo()
     rural_t    = lst_img_n.updateMask(veg_m).reduceRegion(ee.Reducer.median(), aoi, 1000, maxPixels=1e9, bestEffort=True).get('LST').getInfo()
     aoi_mean_t = lst_img_n.reduceRegion(ee.Reducer.mean(), aoi, 1000, maxPixels=1e9, bestEffort=True).get('LST').getInfo()
@@ -1480,14 +1561,14 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
         'Year': year,
         'Month': f"{best_m:02d}",
         'Image_Date': f"{year}-{best_m:02d}-15 (night)",
-        'Satellite': 'MODIS',
+        'Satellite': _modis_label(platform),
         'LC_Source': f"{'MCD12Q1' if use_mcd12q1 else 'NLCD'}-{lc_year}",
         'Urban': round(urban_t, 2),
         'Vegetative': round(rural_t, 2),
         'Mean_LST': round(aoi_mean_t, 2),
         'UHI': round(urban_t - rural_t, 2),
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
-        'NLCD_Year': lc_year,
+        'LC_Year': lc_year,
         'EE_Images': {'LST': lst_img_n, 'LC': lc_img, 'LC_TYPE': 'MCD12Q1' if use_mcd12q1 else 'NLCD', 'UHI': uhi_img}
     }
 
@@ -1869,14 +1950,8 @@ for key, default in [
 # ----------------------------
 if aoi_source == "County (US only)":
     st.subheader("AOI Preview (County)")
-    if _census_key_missing() or _census_api_is_down():
-        st.info(
-            "ℹ️ Enter your Census API key in the sidebar (**🗝️ Census API Key**) "
-            "to use County mode, or switch to **Custom AOI**. "
-            "Get a free key at [api.census.gov/data/key_signup.html](https://api.census.gov/data/key_signup.html)"
-        )
-    elif not counties:
-        st.warning("County list could not be loaded. Census API may be temporarily down.")
+    if not counties:
+        st.warning("County list could not be loaded. Check your connection or use Custom AOI.")
     else:
         show_county_preview_map(states[selected_state], counties[selected_county])
 
@@ -1929,6 +2004,7 @@ elif aoi_source == "City (US only)":
                 horizontal=True
             )
 
+            st.session_state['_buffer_mode'] = buffer_mode
             if buffer_mode == "Recommended":
                 buf_km = rec_buf_km
             elif buffer_mode == "Custom":
@@ -1941,6 +2017,7 @@ elif aoi_source == "City (US only)":
             else:
                 buf_km = 0.0
 
+            st.session_state['_buffer_km'] = float(buf_km)
             # Apply buffer
             if buf_km > 0.0:
                 final_geom = base_geom.buffer(buf_km * 1000)
@@ -1962,7 +2039,7 @@ elif aoi_source == "City (US only)":
             gdf_city = gpd.GeoDataFrame({'name': ['City AOI']}, geometry=[poly], crs="EPSG:4326")
             center = [gdf_city.geometry.centroid.y.mean(), gdf_city.geometry.centroid.x.mean()]
 
-            m = folium.Map(location=center, zoom_start=10, tiles='cartodbpositron', control_scale=True)
+            m = base_folium_map(center, zoom=10)
             folium.GeoJson(
                 gdf_city.__geo_interface__,
                 name="City AOI",
@@ -1989,7 +2066,7 @@ elif aoi_source == "Custom AOI (US / Global)":
                 st.session_state['custom_aoi_geojson'] = gj
                 st.success("Shapefile AOI loaded. This AOI will be used for analysis.")
                 center = [gdf_ll.geometry.centroid.y.mean(), gdf_ll.geometry.centroid.x.mean()]
-                m = folium.Map(location=center, zoom_start=9, tiles='cartodbpositron', control_scale=True)
+                m = base_folium_map(center, zoom=9)
                 folium.GeoJson(
                     gdf_ll.__geo_interface__,
                     name="Shapefile AOI",
@@ -2012,11 +2089,28 @@ if reset_btn:
     st.rerun()
 
 if run_btn:
+    # Clear any previous run first. Without this, a run that fails or is
+    # interrupted leaves the previous city's table, charts and download
+    # button on screen, and the download then serves stale data.
+    st.session_state.analysis_ready = False
+    st.session_state.results_df = None
+    st.session_state.results_df_night = None
+    st.session_state.ee_layers_by_year = {}
+    st.session_state.chart_figures = {}
+    st.session_state.pop("analysis_results", None)
+    st.session_state.pop("run_config", None)
+
     if end_year < start_year:
         st.error("End year must be greater than or equal to start year.")
     elif len(selected_months) == 0:
         st.error("Select at least one month.")
     else:
+        if source.startswith("MODIS") and modis_platform.startswith("Aqua") and start_year < 2003:
+            st.warning(
+                "Aqua (MYD11A1) starts in July 2002, so years before 2003 will "
+                "return no data in Aqua-only mode."
+            )
+
         if aoi_mode == "County boundary":
             with st.spinner("Loading county AOI…"):
                 aoi_ee, aoi_gdf_ll, epsg = load_county_aoi(states[selected_state], counties[selected_county])
@@ -2044,7 +2138,8 @@ if run_btn:
                     yr, aoi_ee, selected_months,
                     custom_veg_codes if not lulc_ref_mode else None,
                     custom_urban_codes if not lulc_ref_mode else None,
-                    use_mcd12q1=use_mcd12q1
+                    use_mcd12q1=use_mcd12q1,
+                    platform=modis_platform
                 )
                 if rec_day:
                     hottest_months[yr] = best_m
@@ -2054,7 +2149,8 @@ if run_btn:
                         yr, aoi_ee, best_m,
                         custom_veg_codes if not lulc_ref_mode else None,
                         custom_urban_codes if not lulc_ref_mode else None,
-                        use_mcd12q1=use_mcd12q1
+                        use_mcd12q1=use_mcd12q1,
+                        platform=modis_platform
                     )
                     if rec_nig:
                         results_night.append(rec_nig)
@@ -2092,6 +2188,19 @@ if run_btn:
         st.session_state.ee_layers_by_year = ee_layers
         st.session_state.aoi_gdf           = aoi_gdf_ll
         st.session_state.aoi_ee            = aoi_ee
+        st.session_state["run_config"] = {
+            "AOI": f"{selected_state} / {selected_county}",
+            "AOI source": aoi_source,
+            "Sensor": (_modis_label(modis_platform) if source.startswith("MODIS") else "Landsat"),
+            "Land cover": ("MODIS MCD12Q1 (500 m)" if use_mcd12q1 else "NLCD (30 m)"),
+            "Buffer": (f"{st.session_state.get('_buffer_mode', 'n/a')}"
+                       f" ({st.session_state.get('_buffer_km', 0.0):.1f} km)"
+                       if aoi_source == "City (US only)" else "n/a"),
+            "Years": f"{start_year}-{end_year}",
+            "Months": ", ".join(selected_months),
+            "Reference classes": ("recommended" if lulc_ref_mode else "custom"),
+            "Run finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
         st.session_state["analysis_results"] = {
             "aoi": aoi_ee,
             "years": years,
@@ -2126,6 +2235,11 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
     # ----- Results Table
     with t1:
         st.subheader("UHI Analysis Results")
+        # Shows exactly which settings produced the numbers below, so a table
+        # left over from an earlier city can be spotted immediately.
+        _cfg = st.session_state.get("run_config")
+        if _cfg:
+            st.caption(" · ".join(f"**{k}:** {v}" for k, v in _cfg.items()))
         c1, c2 = st.columns(2)
         with c1:
             st.metric("UHI 3-yr MA Sen’s slope (Day, °C/yr)", f"{(slope_day or 0):.4f}")
@@ -2135,21 +2249,29 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
         # Day table (add slope/p columns)
         display_df = df.copy()
         display_df['Year'] = display_df['Year'].astype(int).astype(str)
-        if 'NLCD_Year' in display_df.columns and display_df['NLCD_Year'].notna().any():
-            display_df['NLCD_Year'] = display_df['NLCD_Year'].astype(int).astype(str)
+        if 'LC_Year' in display_df.columns and display_df['LC_Year'].notna().any():
+            display_df['LC_Year'] = display_df['LC_Year'].astype(int).astype(str)
 
         display_df['UHI_MA_SenSlope_Day'] = slope_day if slope_day is not None else None
         display_df['UHI_MA_p_Day'] = p_day if p_day is not None else None
 
         cols_day = ['Year','Month','Satellite','LC_Source','Image_Date','Urban','Vegetative','UHI','Mean_LST',
-                    'Mean_NDVI','Mean_NDMI','Mean_NDBI','Urban_Percent','Vegetative_Percent','NLCD_Year',
-                    'UHI_MA_SenSlope_Day','UHI_MA_p_Day']
+                    'Mean_NDVI','Mean_NDMI','Mean_NDBI','Urban_Percent','Vegetative_Percent','Other_Percent',
+                    'LC_Source','LC_Year','UHI_MA_SenSlope_Day','UHI_MA_p_Day']
         cols_day = [c for c in cols_day if c in display_df.columns]  # skip missing cols gracefully
         st.markdown("**Daytime (primary)**")
         st.dataframe(display_df[cols_day], use_container_width=True)
 
         csv_day = display_df[cols_day].to_csv(index=False).encode('utf-8')
-        fname_day = f"{selected_state}_{selected_county}_{'MODIS' if source.startswith('MODIS') else 'Landsat'}_{start_year}_{end_year}_DAY.csv"
+        _plat_tag = (_modis_label(modis_platform).replace('MODIS ', '').replace('+', '-')
+                     if source.startswith('MODIS') else 'Landsat')
+        _lc_tag = 'MCD12Q1' if use_mcd12q1 else 'NLCD'
+        _buf_tag = (str(st.session_state.get('_buffer_mode', '')).split()[0].lower()
+                    if aoi_source == "City (US only)" else 'aoi')
+        _stem = (f"{selected_state}_{selected_county}_"
+                 f"{'MODIS' if source.startswith('MODIS') else 'Landsat'}_{_plat_tag}_"
+                 f"{_lc_tag}_{_buf_tag}_{start_year}_{end_year}").replace(' ', '')
+        fname_day = f"{_stem}_DAY.csv"
         st.download_button("Download Daytime CSV", csv_day, file_name=fname_day, mime='text/csv')
 
         # Night table (MODIS only) + slope/p columns
@@ -2164,17 +2286,19 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
 
             display_n = df_n.copy()
             display_n['Year'] = display_n['Year'].astype(int).astype(str)
-            if 'NLCD_Year' in display_n.columns and display_n['NLCD_Year'].notna().any():
-                display_n['NLCD_Year'] = display_n['NLCD_Year'].astype(int).astype(str)
+            if 'LC_Year' in display_n.columns and display_n['LC_Year'].notna().any():
+                display_n['LC_Year'] = display_n['LC_Year'].astype(int).astype(str)
             display_n['UHI_MA_SenSlope_Night'] = slope_night if slope_night is not None else None
             display_n['UHI_MA_p_Night'] = p_night if p_night is not None else None
 
-            cols_n = ['Year','Month','Satellite','Image_Date','Urban','Vegetative','UHI','Mean_LST',
-                      'Urban_Percent','Vegetative_Percent','NLCD_Year','UHI_MA_SenSlope_Night','UHI_MA_p_Night']
+            cols_n = ['Year','Month','Satellite','LC_Source','Image_Date','Urban','Vegetative','UHI','Mean_LST',
+                      'Urban_Percent','Vegetative_Percent','Other_Percent','LC_Year',
+                      'UHI_MA_SenSlope_Night','UHI_MA_p_Night']
+            cols_n = [c for c in cols_n if c in display_n.columns]
             st.dataframe(display_n[cols_n], use_container_width=True)
 
             csv_n = display_n[cols_n].to_csv(index=False).encode('utf-8')
-            fname_n = f"{selected_state}_{selected_county}_MODIS_{start_year}_{end_year}_NIGHT.csv"
+            fname_n = f"{_stem}_NIGHT.csv"
             st.download_button("Download Nighttime CSV", csv_n, file_name=fname_n, mime='text/csv')
 
     # ----- Charts
@@ -2410,7 +2534,8 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                         'LST_N': float(r_night.get('Mean_LST') or np.nan) if r_night is not None else np.nan,
                         
                         # Land cover
-                        'NLCD': int(r_day.get('NLCD_Year') or 0),
+                        'LC_YR': int(r_day.get('LC_Year') or 0),
+                        'LC_SRC': str(r_day.get('LC_Source', ''))[:20],
                         'UrbPct': float(r_day.get('Urban_Percent') or np.nan),
                         'VegPct': float(r_day.get('Vegetative_Percent') or np.nan),
                         
