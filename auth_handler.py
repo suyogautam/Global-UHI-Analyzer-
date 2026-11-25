@@ -24,31 +24,60 @@ import ee
 # Internal helpers
 # ──────────────────────────────────────────────
 
-def _write_credentials(cred_json: str, project_id: str) -> None:
-    """Write credentials to the standard Earth Engine path and initialize."""
-    ee_dir = os.path.expanduser("~/.config/earthengine")
-    os.makedirs(ee_dir, exist_ok=True)
-    cred_path = os.path.join(ee_dir, "credentials")
-    with open(cred_path, "w") as f:
-        f.write(cred_json)
-    ee.Initialize(project=project_id)
+def _credentials_from_json(cred_json: str, project_id: str):
+    """Build in-memory OAuth credentials from the content of an Earth Engine
+    `credentials` file. Nothing is written to disk, so one user's credentials
+    can never be picked up by another session on a shared server."""
+    from google.oauth2.credentials import Credentials
+    stored = json.loads(cred_json)
+    if not stored.get("refresh_token"):
+        raise ValueError("The file has no refresh_token; re-run `earthengine authenticate`.")
+    return Credentials(
+        None,
+        refresh_token=stored["refresh_token"],
+        token_uri=ee.oauth.TOKEN_URI,
+        client_id=stored.get("client_id", ee.oauth.CLIENT_ID),
+        client_secret=stored.get("client_secret", ee.oauth.CLIENT_SECRET),
+        scopes=stored.get("scopes", ee.oauth.SCOPES),
+        quota_project_id=project_id,
+    )
 
 
 def _try_initialize(project_id: str, cred_json: str | None = None) -> tuple[bool, str]:
     """
     Attempt EE initialization.
     Returns (success: bool, error_message: str).
+    Uploaded credentials stay in this browser session's memory only.
     """
     try:
         if cred_json:
-            _write_credentials(cred_json, project_id)
+            creds = _credentials_from_json(cred_json, project_id)
+            ee.Initialize(credentials=creds, project=project_id)
+            st.session_state["_ee_credentials"] = creds
         else:
             ee.Initialize(project=project_id)
+            st.session_state["_ee_credentials"] = None
         # Quick smoke-test
         ee.Number(1).getInfo()
         return True, ""
     except Exception as exc:
+        st.session_state.pop("_ee_credentials", None)
         return False, str(exc)
+
+
+def _reinitialize_for_session() -> bool:
+    """Re-bind Earth Engine to THIS session's credentials on every rerun, so
+    concurrent users on a hosted server do not run on each other's accounts."""
+    project_id = st.session_state.get("ee_project_id")
+    creds = st.session_state.get("_ee_credentials")
+    try:
+        if creds is not None:
+            ee.Initialize(credentials=creds, project=project_id)
+        else:
+            ee.Initialize(project=project_id)
+        return True
+    except Exception:
+        return False
 
 
 # ──────────────────────────────────────────────
@@ -65,9 +94,12 @@ def render_auth_gate() -> bool:
         if not render_auth_gate():
             st.stop()
     """
-    # Already authenticated in this session?
+    # Already authenticated in this session? Re-bind EE to this session's account.
     if st.session_state.get("ee_authenticated"):
-        return True
+        if _reinitialize_for_session():
+            return True
+        st.session_state["ee_authenticated"] = False
+        st.warning("Your Earth Engine session expired. Please authenticate again.")
 
     # ── Page header ──────────────────────────────────────────────────────
     st.markdown(
@@ -82,7 +114,8 @@ def render_auth_gate() -> bool:
     st.subheader("🔐 Connect your Google Earth Engine account")
     st.markdown(
         "This app runs entirely on **your own** GEE quota — no data is stored. "
-        "Authentication is session-only and cleared when you close the tab."
+        "Uploaded credentials are kept in memory for this browser session only "
+        "(never written to the server's disk) and are discarded when you close the tab."
     )
 
     # ── Method selector ──────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 # UHI Analyzer – Landsat + MODIS (Streamlit app)
-# Satellite-based urban heat island analysis using Google Earth Engine.
+# Satellite-based surface urban heat island (SUHI) analysis using Google Earth Engine.
 # Supports county, city, drawn polygon, and shapefile AOIs.
 # Landsat 5/7/8/9 (30 m) and MODIS Terra+Aqua (1 km) pipelines.
 # NLCD or MODIS MCD12Q1 land cover for urban/vegetated separation.
-# Outputs: results table, trend charts, interactive maps, GeoTIFF, shapefile, ERA5 validation.
+# Outputs: results table, trend charts, interactive maps, GeoTIFF, shapefile, ERA5 consistency check.
+# Pure (Earth Engine-free) logic lives in uhi_core.py and is unit tested in tests/.
 
 from __future__ import annotations
 import streamlit as st
@@ -20,13 +21,13 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from scipy import stats
-from validation_era5 import render_validation_tab
-
-try:
-    import pymannkendall as mk
-    _HAS_MK = True
-except Exception:
-    _HAS_MK = False
+from era5_consistency import render_consistency_tab
+from uhi_core import (
+    MODIS_LST_SCALE, KELVIN_OFFSET, MODIS_QC_MANDATORY_BITS, MODIS_QC_MAX_ACCEPTED,
+    MIN_REF_PERCENT, MIN_REF_PIXELS, TREND_TESTS,
+    pick_hottest_month, suhi, landcover_shares, low_reference,
+    average_monthly_records, moving_average_by_year, trend_stats,
+)
 import ee
 from datetime import datetime
 
@@ -41,10 +42,10 @@ from shapely.geometry import shape as shp_shape, Point as shp_Point
 # Page & UI
 # ----------------------------
 st.set_page_config(page_title="Urban Heat Island Analyzer", page_icon="🌡️", layout="wide")
-st.title("Urban Heat Island (UHI) Analyzer – Landsat + MODIS")
+st.title("Surface Urban Heat Island (SUHI) Analyzer – Landsat + MODIS")
 st.caption(
-    "Landsat (30 m) or MODIS (1 km) · hottest-month selection per year · "
-    "NDVI, NDMI, NDBI, LST, UHI · trend analysis with Sen’s slope & Mann–Kendall · "
+    "Landsat (30 m) or MODIS (1 km) · hottest month or seasonal mean per year · "
+    "NDVI, NDMI, NDBI, LST, SUHI · trend analysis with Sen’s slope & Mann–Kendall · "
     "NLCD/MODIS LULC · interactive maps · GeoTIFF & shapefile export. "
     "**NLCD-based analysis (Landsat & MODIS) is US-only. For global coverage, switch to MODIS + MCD12Q1 land cover.**"
 )
@@ -52,53 +53,63 @@ st.caption(
 with st.expander("🔍 How it works"):
     st.markdown("""
 ### Overview
-Analyze UHI for **any U.S. county**, a **city**, or a **custom drawn/uploaded AOI** using **Landsat** (30 m, 2000–2026) or **MODIS** (1 km, 2000–2026). For each year the app identifies the **hottest month** (from your selected month set) based on peak daytime LST, computes spectral indices and land surface temperature, separates urban from vegetated pixels using NLCD or MODIS MCD12Q1 land cover, and calculates UHI intensity. Results include year-by-year tables, trend analysis, interactive maps, and multiple export options.
+Analyze the surface urban heat island (SUHI) for **any U.S. county**, a **city**, or a **custom drawn/uploaded AOI** using **Landsat** (30 m, 2000–2026) or **MODIS** (1 km, 2000–2026). For each year the app either picks the **hottest month** (from your selected month set, based on daytime LST) or averages **all selected months** (seasonal mean). It computes spectral indices and land surface temperature, separates urban from vegetated pixels using NLCD or MODIS MCD12Q1 land cover, and calculates SUHI intensity. Results include year-by-year tables, trend analysis, interactive maps, and multiple export options.
 
-> ⚠️ **Coverage note:** NLCD-based analysis (Landsat and MODIS) is **US-only**. For areas outside the US, switch to **MODIS + MCD12Q1** land cover. MODIS MCD12Q1 has a 500 m pixel size — small cities where urban-class pixels are absent or sparse within the AOI may return no urban data or unreliable UHI estimates.
+> ⚠️ **Coverage note:** NLCD-based analysis (Landsat and MODIS) is **US-only**. For areas outside the US, switch to **MODIS + MCD12Q1** land cover. MODIS MCD12Q1 has a 500 m pixel size — small cities where urban-class pixels are absent or sparse within the AOI may return no urban data or unreliable SUHI estimates.
 
 ---
+
+### Definition
+**SUHI (°C) = median LST of urban pixels − median LST of vegetated-reference pixels** inside the AOI, for the same composite (Landsat uses the mean of the 5th–95th percentile-filtered LST). The **SUHI map layer** shows, for each urban pixel, its LST minus the AOI's vegetated-reference value. Years with no valid urban or reference LST are left empty (never filled with 0).
 
 ### Landsat pipeline (30 m · Collection 2 Level-2)
 1. **Sensors:** Landsat 5 TM (2000–2012), Landsat 7 ETM+ (gap-fill only), Landsat 8 OLI-TIRS and Landsat 9 (2013–2026) — pulled from `LANDSAT/LT05`, `LC07`, `LC08`, `LC09` C02 T1_L2 collections.
 2. **Scale factors:** Surface reflectance `SR_* × 0.0000275 − 0.2`; surface temperature (Kelvin) `ST_* × 0.00341802 + 149.0` → °C.
 3. **Cloud/shadow masking:** `QA_PIXEL` bitmask (cloud, cloud shadow, dilated cloud).
 4. **Monthly median composites** per selected month.
-5. **Hottest month selection:** Highest AOI-median LST across the selected month set.
+5. **Month aggregation:** hottest month (highest AOI-median LST) or the mean of all selected months.
 6. **Outlier filtering:** LST clipped to 5th–95th percentiles within AOI before statistics.
 7. **Spectral indices:** NDVI = (NIR − Red)/(NIR + Red); NDMI = (NIR − SWIR1)/(NIR + SWIR1); NDBI = (SWIR1 − NIR)/(SWIR1 + NIR). Bands mapped per sensor.
 8. **Land cover (NLCD):** Nearest available year (2001–2021). Urban = classes 22–24 (Developed Low/Med/High); Vegetated = 41–43, 52, 71, 21. Water (11) and Cropland (82) excluded from vegetated reference.
-9. **UHI = urban median LST − vegetated median LST.** Area percentages computed from pixel counts.
+9. **SUHI = urban LST − vegetated LST.** Area percentages and valid-pixel counts are reported per year.
+
+> Landsat 5 ends in 2012 and Landsat 8 starts in 2013; values on either side of this change come from different sensors and should be compared with care.
 
 ### MODIS pipeline (1 km · Terra + Aqua merged)
-1. **Daytime LST:** `MOD11A1` (Terra) and/or `MYD11A1` (Aqua) per the **MODIS platform** selector — combined by default — `LST_Day_1km` band, QC-filtered, scaled to °C, monthly median.
-2. **Hottest month selection:** Highest AOI-median daytime LST.
-3. **Nighttime LST:** Same hottest month, `LST_Night_1km`, same QC and scale logic.
+1. **Daytime LST:** `MOD11A1` (Terra) and/or `MYD11A1` (Aqua) per the **MODIS platform** selector — combined by default — `LST_Day_1km` band, QC-filtered (mandatory QA bits 0–1 < 2), scaled `DN × 0.02 − 273.15` → °C, monthly median.
+2. **Month aggregation:** hottest month (highest AOI-median daytime LST) or the mean of all selected months.
+3. **Nighttime LST:** Same month(s) as daytime, `LST_Night_1km`, same QC and scale logic.
 4. **Spectral indices (day):** `MOD09GA` (Terra) or `MYD09GA` (Aqua-only mode) surface reflectance (× 0.0001), monthly median → NDVI, NDMI, NDBI.
 5. **Land cover:** NLCD (US-only) or MODIS MCD12Q1 IGBP (`MODIS/061/MCD12Q1`, annual 2001–present, global). Urban = class 13; Vegetated = classes 1–10 (forests, shrublands, savannas, grasslands).
-6. **UHI** computed for both day and night using the same urban/vegetated separation.
+6. **SUHI** computed for both day and night using the same urban/vegetated separation.
+
+> Terra (≈10:30 / 22:30) and Aqua (≈13:30 / 01:30) observe at different local times, so Terra-only, Aqua-only and combined runs are not interchangeable; keep one setting within a study.
 
 ### Trend analysis
-Each metric (UHI, Mean LST, NDVI, NDMI, NDBI) is plotted as original annual values with a 3-year centered moving average. **Sen’s slope** and **Mann–Kendall p-value** are fitted separately to both the original and smoothed series. UHI slope and p-value are included in the results table and exported CSV.
+**Sen’s slope** (Theil–Sen, per year) and the **Mann–Kendall p-value** are computed on the **original, unsmoothed annual series**. You can choose the original Mann–Kendall test or the Hamed–Rao modified test, which corrects for serial correlation. The 3-year centered moving average is drawn for visual guidance only and is not used for any statistic.
+
+### Quality information
+Each year reports the number of valid LST pixels in the AOI, urban class and vegetated reference, and the reference share of the AOI. The app warns when the vegetated reference is below {MIN_REF_PERCENT:.0f}% of the AOI or has fewer than {MIN_REF_PIXELS} valid pixels, and lists years with no valid result.
 
 ### Outputs
-- **Results table** (CSV) — yearly metrics, land-cover percentages, slope/p-values.
-- **Trend charts** (PNG ZIP) — UHI, LST, NDVI, NDMI, NDBI, urban vs vegetated comparison.
-- **Interactive map** — toggle LST, NDVI, NDMI, NDBI, LULC, UHI layers; continuous colorbars; AOI outline.
+- **Results table** (CSV) — yearly metrics, land-cover percentages, pixel counts, trend slope/p-values.
+- **Trend charts** (PNG ZIP) — SUHI, LST, NDVI, NDMI, NDBI, urban vs vegetated comparison.
+- **Interactive map** — toggle LST, NDVI, NDMI, NDBI, LULC, SUHI layers; continuous colorbars; AOI outline.
 - **GeoTIFF export** — all raster layers for any selected year queued to Google Drive.
 - **Shapefile export** (ZIP) — AOI polygon + per-year point features with all metrics as attributes.
-- **ERA5 validation tab** — Pearson correlation of satellite LST anomalies against ERA5-Land 2 m air temperature reanalysis.
-""")
+- **ERA5 consistency check tab** — Pearson correlation of satellite LST anomalies with ERA5-Land 2 m air temperature anomalies (a consistency check, not a validation of LST).
+""".replace("{MIN_REF_PERCENT:.0f}", f"{MIN_REF_PERCENT:.0f}").replace("{MIN_REF_PIXELS}", str(MIN_REF_PIXELS)))
 
 with st.expander("📋 How to use this app"):
     st.markdown("""
 ### Step-by-step guide
 
 **1. Authenticate**
-Upload your Google Earth Engine credentials file (or use local auth if running locally). Enter your GEE Project ID and click Authenticate.
+Upload your Google Earth Engine credentials file (or use local auth if running locally). Enter your GEE Project ID and click Authenticate. Uploaded credentials are kept in memory for your browser session only and are never written to disk.
 
 **2. Select your sensor platform**
 - *Landsat* — 30 m resolution, US-only NLCD land cover, good for detailed city-scale analysis.
-- *MODIS* — 1 km resolution, supports global coverage when paired with MCD12Q1. Also provides nighttime LST.
+- *MODIS* — 1 km resolution, supports global coverage when paired with MCD12Q1. Also provides nighttime LST. Choose Terra + Aqua, Terra only or Aqua only.
 
 **3. Define your Area of Interest (AOI)**
 Choose one of four modes from the sidebar:
@@ -107,9 +118,10 @@ Choose one of four modes from the sidebar:
 - **Draw** — use the drawing tool on the interactive map; finish the polygon and click *Use this polygon*.
 - **Shapefile** — upload a ZIP containing a .shp file (and associated .dbf/.shx/.prj).
 
-**4. Set your time range and months**
+**4. Set your time range, months and aggregation**
 - Choose start and end year (2000–2026).
-- Select individual months or use the season preset (e.g. JJA = Jun–Aug for summer analysis).
+- Select individual months or use the season preset (e.g. JJA = Jun–Aug for summer analysis). Selecting a single month gives a fixed-month analysis.
+- Choose **Hottest month** or **Seasonal mean (all selected months)**.
 
 **5. Select land cover source** *(MODIS only)*
 - *NLCD* — 30 m, US-only, biennial updates.
@@ -118,26 +130,31 @@ Choose one of four modes from the sidebar:
 **6. Urban & Vegetative classes** *(optional)*
 Expand the *Urban & Vegetative Reference* panel to customize which land cover classes define the urban and vegetated zones. Default recommended classes are pre-selected.
 
-**7. Run Analysis**
-Click **Run Analysis**. Processing time depends on the number of years and AOI size (typically 1–5 minutes).
+**7. Trend test** *(optional)*
+Choose the original Mann–Kendall test or the Hamed–Rao autocorrelation-corrected version.
+
+**8. Run Analysis**
+Click **Run Analysis**. Processing time depends on the number of years and AOI size (typically 1–5 minutes; seasonal mean takes longer).
+
+**Sensitivity testing:** run the same AOI with different month, sensor, land-cover or reference-class settings and compare the downloaded CSVs. The file names record the settings used.
 
 ---
 
 ### Reading the outputs
 
 **Results Table tab**
-- One row per year showing Urban LST, Vegetated LST, Mean LST, UHI intensity, NDVI, NDMI, NDBI, and land-cover percentages.
+- One row per year showing Urban LST, Vegetated LST, Mean LST, SUHI intensity, NDVI, NDMI, NDBI, land-cover percentages and valid-pixel counts.
 - Download as CSV.
 
 **Charts tab**
-- Each metric plotted as yearly values + 3-year moving average.
-- Sen’s slope (trend rate in °C/yr or index units/yr) and Mann–Kendall p-value shown for significance.
+- Each metric plotted as yearly values, with a 3-year moving average for visual guidance.
+- Sen’s slope (trend rate in °C/yr or index units/yr) and Mann–Kendall p-value of the original series shown for significance.
 - Urban vs Vegetated temperature comparison chart included.
 - Download all charts as a ZIP of PNGs.
 
 **Interactive Map tab**
 - Select any year from the dropdown to load that year’s layers.
-- Toggle individual layers (LST, NDVI, NDMI, NDBI, LULC, UHI, AOI boundary) in the layer control (top-right).
+- Toggle individual layers (LST, NDVI, NDMI, NDBI, LULC, SUHI, AOI boundary) in the layer control (top-right).
 - Horizontal colorbars at the top show the value range for each continuous layer.
 - Export rasters to Google Drive from this tab.
 
@@ -147,8 +164,8 @@ Click **Run Analysis**. Processing time depends on the number of years and AOI s
 **Shapefile Export tab**
 - Download AOI and point features with all metrics as attributes for use in GIS software.
 
-**Validation tab**
-- Compares satellite-derived LST anomalies against ERA5-Land 2 m air temperature (Pearson r, p-value, scatter plot, time series).
+**ERA5 Consistency tab**
+- Compares satellite-derived LST anomalies with ERA5-Land 2 m air temperature anomalies (Pearson r, p-value, scatter plot, time series). Air temperature is not LST, so this checks that year-to-year variation is consistent; it does not validate LST values.
 """)
 
 with st.expander("🧑‍💻 About the developer"):
@@ -373,7 +390,7 @@ with st.sidebar.expander("🗝️ Census API Key (optional)", expanded=False):
     if _census_key_missing():
         st.caption(
             "Optional free key: "
-            "[api.census.gov/data/key\_signup.html](https://api.census.gov/data/key_signup.html)"
+            "[api.census.gov/data/key\\_signup.html](https://api.census.gov/data/key_signup.html)"
         )
     elif st.session_state.get("_census_key_invalid"):
         st.warning("Key not accepted by the ACS API. County names will come "
@@ -645,13 +662,13 @@ with st.sidebar.expander("🏙 Urban & Vegetative Reference", expanded=False):
         custom_urban_codes = []  # → recommended
         custom_veg_codes   = []  # → recommended
     else:
-        st.markdown(f"**Urban classes** *({_lc_label}) — hot side of UHI*")
+        st.markdown(f"**Urban classes** *({_lc_label}) — hot side of SUHI*")
         custom_urban_labels = st.multiselect(
             "Urban classes",
             options=list(_active_class_opts.keys()),
             default=[l for l in _active_default_urban if l in _active_class_opts],
             key="custom_urban",
-            help="Classes treated as the urban (warm) surface. UHI = Urban LST − Vegetative LST."
+            help="Classes treated as the urban (warm) surface. SUHI = Urban LST − Vegetative LST."
         )
         custom_urban_codes = [_active_class_opts[l] for l in custom_urban_labels]
         if not custom_urban_codes:
@@ -673,7 +690,7 @@ with st.sidebar.expander("🏙 Urban & Vegetative Reference", expanded=False):
 
         overlap = set(custom_urban_codes) & set(custom_veg_codes)
         if overlap:
-            st.warning(f"⚠️ Classes appear in both urban and vegetative lists — UHI will be biased.")
+            st.warning(f"⚠️ Classes appear in both urban and vegetative lists — SUHI will be biased.")
 
 # Seasonal presets
 season_mode = st.sidebar.radio("Selection mode", ["Custom months", "Season (preset)"], index=1)
@@ -691,6 +708,33 @@ if season_mode == "Season (preset)":
 else:
     month_options   = ['01-Jan','02-Feb','03-Mar','04-Apr','05-May','06-Jun','07-Jul','08-Aug','09-Sep','10-Oct','11-Nov','12-Dec']
     selected_months = st.sidebar.multiselect("Months to consider", month_options, default=['06-Jun','07-Jul','08-Aug'])
+
+# Month aggregation within each year
+month_agg = st.sidebar.radio(
+    "Monthly aggregation",
+    ["Hottest month", "Seasonal mean (all selected months)"],
+    index=0,
+    key="month_agg",
+    help=(
+        "Hottest month: for each year, the selected month with the highest AOI-median daytime LST.\n"
+        "Seasonal mean: SUHI and all other metrics are computed for every selected month and averaged "
+        "(slower). Select a single month for a fixed-month analysis."
+    ),
+)
+use_seasonal_mean = month_agg.startswith("Seasonal")
+
+# Trend significance test (always on the unsmoothed annual series)
+trend_test_label = st.sidebar.selectbox(
+    "Trend significance test",
+    list(TREND_TESTS.keys()),
+    index=0,
+    key="trend_test",
+    help=(
+        "Sen's slope and the Mann–Kendall p-value are computed on the original annual values. "
+        "Hamed–Rao corrects the test for serial correlation. The 3-year moving average is for display only."
+    ),
+)
+trend_test = TREND_TESTS[trend_test_label]
 
 @st.cache_data(show_spinner=False)
 def load_city_aoi_from_census(state_fips: str, city_name: str):
@@ -957,16 +1001,14 @@ def landcover_percentages(aoi_geom, nlcd_img, custom_veg_codes=None, custom_urba
         ee.Reducer.sum(), aoi_geom, 30, maxPixels=1e9, bestEffort=True
     ).get('area')
     try:
-        tot = float(ee.Number(total_area).getInfo() or 0.0)
-        u   = float(ee.Number(urban_area).getInfo() or 0.0)
-        v   = float(ee.Number(veg_area).getInfo() or 0.0)
-        if tot <= 0: return 0.0, 0.0, 0.0
-        up = (u / tot) * 100.0
-        vp = (v / tot) * 100.0
-        op = max(0.0, 100.0 - up - vp)
-        return up, vp, op
+        tot = ee.Number(total_area).getInfo()
+        u   = ee.Number(urban_area).getInfo()
+        v   = ee.Number(veg_area).getInfo()
     except Exception:
-        return 0.0, 0.0, 0.0
+        # Failed request: report missing values (NaN), never 0 %
+        return float('nan'), float('nan'), float('nan')
+    # No urban / no vegetated pixels is a real 0 %; a missing total is NaN
+    return landcover_shares(tot, u, v)
 
 # ----------------------------
 # MCD12Q1 (MODIS Land Cover) helpers — 500 m, annual, global, IGBP Type 1
@@ -1037,16 +1079,14 @@ def landcover_percentages_mcd(aoi_geom, lc_img: ee.Image, custom_veg_codes=None,
         ee.Reducer.sum(), aoi_geom, scale, maxPixels=1e9, bestEffort=True
     ).get('area')
     try:
-        tot = float(ee.Number(total_area).getInfo() or 0.0)
-        u   = float(ee.Number(urban_area).getInfo() or 0.0)
-        v   = float(ee.Number(veg_area).getInfo() or 0.0)
-        if tot <= 0: return 0.0, 0.0, 0.0
-        up = (u / tot) * 100.0
-        vp = (v / tot) * 100.0
-        op = max(0.0, 100.0 - up - vp)
-        return up, vp, op
+        tot = ee.Number(total_area).getInfo()
+        u   = ee.Number(urban_area).getInfo()
+        v   = ee.Number(veg_area).getInfo()
     except Exception:
-        return 0.0, 0.0, 0.0
+        # Failed request: report missing values (NaN), never 0 %
+        return float('nan'), float('nan'), float('nan')
+    # No urban / no vegetated pixels is a real 0 %; a missing total is NaN
+    return landcover_shares(tot, u, v)
 
 def mcd12q1_styled_and_legend(lc_img: ee.Image):
     """Colorful IGBP styled layer + legend dict for map display."""
@@ -1224,6 +1264,20 @@ def filter_lst_percentiles(lst_image, aoi):
 # ----------------------------
 # Landsat pipeline
 # ----------------------------
+def _count_valid_pixels(lst_img, urban_mask, veg_mask, geom, scale):
+    """Number of valid LST pixels in the AOI, urban class and vegetated reference
+    (same images, masks and scale used for the SUHI statistics). None on failure."""
+    try:
+        img = ee.Image.cat([
+            lst_img.select(['LST'], ['n_all']),
+            lst_img.updateMask(urban_mask).select(['LST'], ['n_urb']),
+            lst_img.updateMask(veg_mask).select(['LST'], ['n_veg']),
+        ])
+        d = img.reduceRegion(ee.Reducer.count(), geom, scale, maxPixels=1e9, bestEffort=True).getInfo()
+        return d.get('n_all'), d.get('n_urb'), d.get('n_veg')
+    except Exception:
+        return None, None, None
+
 def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_codes=None, selected_sensors=None):
     """
     Process Landsat data for a given year using all applicable sensors.
@@ -1336,7 +1390,7 @@ def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_
         st.warning(f"Could not calculate LST for {year}.")
         return None
 
-    _, best_m = max(temps, key=lambda x: x[0])
+    best_m = pick_hottest_month(temps)
     comp = monthly[best_m]
     img  = comp['image']
 
@@ -1369,10 +1423,17 @@ def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_
 
     urban_mean = urban_stats.get('LST')
     veg_mean   = veg_stats.get('LST')
-    uhi_val    = (urban_mean - veg_mean) if (urban_mean is not None and veg_mean is not None) else None
+    uhi_val    = suhi(urban_mean, veg_mean)
 
-    rural_mean_num = ee.Number(veg_stats.get('LST') if veg_stats.get('LST') is not None else 0.0)
-    uhi_img = lst_filtered.updateMask(urban_mask).subtract(ee.Image.constant(rural_mean_num)).rename('UHI')
+    # Valid (unmasked) LST pixel counts at 30 m: AOI, urban class, vegetated reference
+    n_all, n_urb, n_veg = _count_valid_pixels(lst_filtered, urban_mask, veg_mask, aoi.geometry(), 30)
+
+    # SUHI raster: urban-pixel LST minus the AOI vegetated-reference value.
+    # Not produced when the reference is missing (no fake 0 °C baseline).
+    ee_imgs = {'LST': lst_filtered, 'NDVI': ndvi, 'NDMI': ndmi, 'NDBI': ndbi,
+               'LC': nlcd, 'LC_TYPE': 'NLCD'}
+    if veg_mean is not None:
+        ee_imgs['UHI'] = lst_filtered.updateMask(urban_mask).subtract(ee.Image.constant(veg_mean)).rename('UHI')
 
     sat_label = ' + '.join(sorted(satellite_labels_used)) if satellite_labels_used else (
         'Landsat 5' if year <= 2012 else 'Landsat 8/9'
@@ -1390,11 +1451,11 @@ def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_
         'Mean_NDBI': ndbi_stats.get('NDBI'),
         'UHI': uhi_val,
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
+        'N_Valid_px': n_all, 'N_Urban_px': n_urb, 'N_Veg_px': n_veg,
         'Satellite': sat_label,
         'LC_Source': f"NLCD-{nlcd_year}",
         'LC_Year': nlcd_year,
-        'EE_Images': {'LST': lst_filtered, 'NDVI': ndvi, 'NDMI': ndmi, 'NDBI': ndbi,
-                      'LC': nlcd, 'LC_TYPE': 'NLCD', 'UHI': uhi_img}
+        'EE_Images': ee_imgs
     }
 
 # ----------------------------
@@ -1403,8 +1464,9 @@ def process_landsat_data(year, aoi, months, custom_veg_codes=None, custom_urban_
 def _scale_mask_modis_lst(img, lst_band: str, qc_band: str):
     qc = img.select(qc_band)
     # Keep Mandatory QA bits (0–1) < 2  → 0=good, 1=other quality; exclude 2/3 (not produced)
-    good = qc.bitwiseAnd(3).lt(2)
-    return img.select(lst_band).updateMask(good).multiply(0.02).subtract(273.15).rename('LST')
+    good = qc.bitwiseAnd(MODIS_QC_MANDATORY_BITS).lt(MODIS_QC_MAX_ACCEPTED)
+    return (img.select(lst_band).updateMask(good)
+            .multiply(MODIS_LST_SCALE).subtract(KELVIN_OFFSET).rename('LST'))
 
 def _modis_platform_flags(platform: str):
     """('Terra + Aqua (combined)'|'Terra only (MOD)'|'Aqua only (MYD)') -> (use_terra, use_aqua)."""
@@ -1476,10 +1538,10 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         if t is not None:
             temps.append((t, m))
             lst_by_m[m] = lst_img
-    if not temps:
+    best_m = pick_hottest_month(temps)
+    if best_m is None:
         return None, None, None
 
-    _, best_m = max(temps, key=lambda x: x[0])
     index_img = modis_indices_median(year, best_m, aoi, platform)
     stats_idx = index_img.reduceRegion(ee.Reducer.median(), aoi, 1000, maxPixels=1e9, bestEffort=True).getInfo()
     ndvi = stats_idx.get('NDVI'); ndmi = stats_idx.get('NDMI'); ndbi = stats_idx.get('NDBI')
@@ -1510,6 +1572,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         up, vp, op = landcover_percentages(aoi.geometry(), lc_img, custom_veg_codes, custom_urban_codes)
 
     uhi_img = lst_img.updateMask(urban_m).subtract(ee.Image.constant(rural_t)).rename('UHI')
+    n_all, n_urb, n_veg = _count_valid_pixels(lst_img, urban_m, veg_m, aoi, 1000)
 
     rec_day = {
         'Year': year,
@@ -1525,6 +1588,7 @@ def process_modis_day_and_best_month(year: int, aoi: ee.FeatureCollection, month
         'Mean_NDBI': round(ndbi, 4) if ndbi is not None else None,
         'UHI': round(urban_t - rural_t, 2),
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
+        'N_Valid_px': n_all, 'N_Urban_px': n_urb, 'N_Veg_px': n_veg,
         'LC_Year': lc_year,
         'EE_Images': {'LST': lst_img, 'NDVI': index_img.select('NDVI'),
                       'NDMI': index_img.select('NDMI'), 'NDBI': index_img.select('NDBI'),
@@ -1556,6 +1620,7 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
         up, vp, op = landcover_percentages(aoi.geometry(), lc_img, custom_veg_codes, custom_urban_codes)
 
     uhi_img = lst_img_n.updateMask(urban_m).subtract(ee.Image.constant(rural_t)).rename('UHI')
+    n_all, n_urb, n_veg = _count_valid_pixels(lst_img_n, urban_m, veg_m, aoi, 1000)
 
     return {
         'Year': year,
@@ -1568,9 +1633,81 @@ def process_modis_night_for_month(year: int, aoi: ee.FeatureCollection, best_m: 
         'Mean_LST': round(aoi_mean_t, 2),
         'UHI': round(urban_t - rural_t, 2),
         'Urban_Percent': up, 'Vegetative_Percent': vp, 'Other_Percent': op,
+        'N_Valid_px': n_all, 'N_Urban_px': n_urb, 'N_Veg_px': n_veg,
         'LC_Year': lc_year,
         'EE_Images': {'LST': lst_img_n, 'LC': lc_img, 'LC_TYPE': 'MCD12Q1' if use_mcd12q1 else 'NLCD', 'UHI': uhi_img}
     }
+
+# ----------------------------
+# Seasonal mean (average of all selected months within a year)
+# ----------------------------
+_SEASONAL_NUMERIC = ['Urban', 'Vegetative', 'Mean_LST', 'Mean_NDVI', 'Mean_NDMI', 'Mean_NDBI', 'UHI',
+                     'Urban_Percent', 'Vegetative_Percent', 'Other_Percent',
+                     'N_Valid_px', 'N_Urban_px', 'N_Veg_px']
+_ROUND_2 = {'Urban', 'Vegetative', 'Mean_LST', 'UHI'}
+_ROUND_4 = {'Mean_NDVI', 'Mean_NDMI', 'Mean_NDBI'}
+_COUNTS = {'N_Valid_px', 'N_Urban_px', 'N_Veg_px'}
+
+def _combine_seasonal(year: int, recs: list, night: bool = False):
+    """Average per-month records of one year into one seasonal-mean record.
+    Map layers are taken from the month with the highest mean LST."""
+    if not recs:
+        return None
+    keys = [k for k in _SEASONAL_NUMERIC if any(k in r for r in recs)]
+    avg = average_monthly_records(recs, keys)
+    for k, v in avg.items():
+        if v is None:
+            continue
+        if k in _ROUND_2:
+            avg[k] = round(v, 2)
+        elif k in _ROUND_4:
+            avg[k] = round(v, 4)
+        elif k in _COUNTS:
+            avg[k] = int(round(v))
+    hottest = max(recs, key=lambda r: (r.get('Mean_LST') if r.get('Mean_LST') is not None else -1e9))
+    months_used = sorted(int(r['Month']) for r in recs)
+    out = {k: v for k, v in hottest.items() if k not in _SEASONAL_NUMERIC}
+    out.update(avg)
+    out['Year'] = year
+    out['Month'] = '+'.join(f"{m:02d}" for m in months_used)
+    out['N_Months'] = len(months_used)
+    out['Image_Date'] = f"{year} seasonal mean ({len(months_used)} months){' (night)' if night else ''}"
+    return out
+
+def process_modis_seasonal_mean(year: int, aoi: ee.FeatureCollection, months: list[str], custom_veg_codes=None,
+                                custom_urban_codes=None, use_mcd12q1: bool = False,
+                                platform: str = "Terra + Aqua (combined)"):
+    """Day and night records averaged over every selected month (each month processed
+    exactly as a single-month run). Returns (rec_day, rec_night, months_used)."""
+    day_recs, night_recs = [], []
+    for m in months:
+        rec_d, best_m, _ = process_modis_day_and_best_month(
+            year, aoi, [m], custom_veg_codes, custom_urban_codes,
+            use_mcd12q1=use_mcd12q1, platform=platform)
+        if not rec_d:
+            continue
+        day_recs.append(rec_d)
+        rec_n = process_modis_night_for_month(
+            year, aoi, best_m, custom_veg_codes, custom_urban_codes,
+            use_mcd12q1=use_mcd12q1, platform=platform)
+        if rec_n:
+            night_recs.append(rec_n)
+    if not day_recs:
+        return None, None, []
+    months_used = sorted(int(r['Month']) for r in day_recs)
+    return _combine_seasonal(year, day_recs), _combine_seasonal(year, night_recs, night=True), months_used
+
+def process_landsat_seasonal_mean(year, aoi, months, custom_veg_codes=None, custom_urban_codes=None,
+                                  selected_sensors=None):
+    """Landsat record averaged over every selected month. Returns (rec, months_used)."""
+    recs = []
+    for m in months:
+        r = process_landsat_data(year, aoi, [m], custom_veg_codes, custom_urban_codes, selected_sensors)
+        if r:
+            recs.append(r)
+    if not recs:
+        return None, []
+    return _combine_seasonal(year, recs), sorted(int(r['Month']) for r in recs)
 
 # ----------------------------
 # Map & Legends & Drive export
@@ -1622,8 +1759,8 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
         m.addLayer(lc_styled, {}, lc_layer_name)
 
     if 'UHI' in ee_images:
-        m.addLayer(ee_images['UHI'].clip(aoi_geom), uhi_vis, 'UHI Intensity (°C)')
-        colorbar_layers.append(("UHI (°C)", uhi_vis['palette'], uhi_vis['min'], uhi_vis['max']))
+        m.addLayer(ee_images['UHI'].clip(aoi_geom), uhi_vis, 'SUHI (°C, urban pixel − reference)')
+        colorbar_layers.append(("SUHI (°C)", uhi_vis['palette'], uhi_vis['min'], uhi_vis['max']))
 
     # AOI boundary
     try:
@@ -1687,10 +1824,10 @@ def folium_map_with_layers(ee_images: dict, aoi_geom, map_center):
 def export_layers_to_drive(year: int, layers: dict, aoi_fc: ee.FeatureCollection, folder: str, scale: int):
     region = aoi_fc.geometry()
     for key, image in layers.items():
-        if image is None:
+        if image is None or isinstance(image, str):   # skip 'LC_TYPE' label
             continue
         try:
-            desc = f"{key}_{year}"
+            desc = f"{'SUHI' if key == 'UHI' else key}_{year}"
             geemap.ee_export_image_to_drive(
                 image=image, description=desc, folder=folder,
                 region=region, scale=scale, fileFormat='GeoTIFF', crs='EPSG:4326'
@@ -1703,27 +1840,23 @@ def export_layers_to_drive(year: int, layers: dict, aoi_fc: ee.FeatureCollection
 # Trend helpers & plotting
 # ----------------------------
 def sens_slope_and_p(x_vals: np.ndarray, y_vals: np.ndarray):
-    mask = ~np.isnan(y_vals)
-    x = x_vals[mask]; y = y_vals[mask]
-    if y.size < 2: return None, None
-    if _HAS_MK:
-        res = mk.original_test(y)
-        slope, p = float(res.slope), float(res.p)
-    else:
-        slope, _, _, _ = stats.theilslopes(y, x)
-        _, p = stats.kendalltau(x, y)
-        slope, p = float(slope), float(p)
-    return slope, p
+    """Theil–Sen slope (per year) and Mann–Kendall p of the ORIGINAL annual series,
+    using the test chosen in the sidebar. Never applied to the moving average."""
+    return trend_stats(x_vals, y_vals, trend_test)
+
+def _fmt(v, nd=4):
+    """Format a statistic; 'n/a' when it could not be computed (never a fake 0 or 1)."""
+    return "n/a" if v is None or not np.isfinite(v) else f"{v:.{nd}f}"
 
 def _save_fig_to_bytes(fig):
     b = io.BytesIO(); fig.savefig(b, format='png', dpi=300, bbox_inches='tight'); b.seek(0); return b.getvalue()
 
 def plot_series_with_trends(years: np.ndarray, y: np.ndarray, title: str, ylabel: str, legend_prefix: str, store_key: str, night: bool=False):
-    s = pd.Series(y)
-    ma = s.rolling(window=3, center=True, min_periods=1).mean().to_numpy()
+    y = np.asarray(y, dtype=float)
+    # 3-yr moving average on the calendar-year axis: display only (no statistics)
+    ma = moving_average_by_year(years, y) if len(years) else y
 
     slope_raw, p_raw = sens_slope_and_p(years, y)
-    slope_ma,  p_ma  = sens_slope_and_p(years, ma)
 
     orig_color = '#1f77b4'
     ma_color   = '#ff7f0e'
@@ -1743,35 +1876,25 @@ def plot_series_with_trends(years: np.ndarray, y: np.ndarray, title: str, ylabel
         marker=dict(size=6), opacity=0.50
     ))
 
-    # 3-year MA
+    # 3-year MA (visual guide only)
     fig.add_trace(go.Scatter(
-        x=years, y=ma, mode='lines+markers', name=f'{legend_prefix} (3-yr MA)',
+        x=years, y=ma, mode='lines+markers', name=f'{legend_prefix} (3-yr MA, display only)',
         line=dict(color=ma_color, width=2.5),
         marker=dict(size=7, symbol='square')
     ))
 
-    # Trend lines
+    # Theil–Sen trend line of the original series, through the median point
+    trend_line = None
     if slope_raw is not None:
-        valid_y = y[~np.isnan(y)]
-        if len(valid_y) > 0:
-            x_line = np.array([years.min(), years.max()])
-            y_raw  = slope_raw * (x_line - x_line[0]) + valid_y[0]
-            fig.add_trace(go.Scatter(
-                x=x_line, y=y_raw, mode='lines',
-                name=f'Original trend: {slope_raw:.4f}/yr (p={p_raw:.3f})',
-                line=dict(color=orig_color, width=2, dash='dash'), opacity=0.65
-            ))
-
-    if slope_ma is not None:
-        valid_ma = ma[~np.isnan(ma)]
-        if len(valid_ma) > 0:
-            x_line = np.array([years.min(), years.max()])
-            y_ma   = slope_ma * (x_line - x_line[0]) + valid_ma[0]
-            fig.add_trace(go.Scatter(
-                x=x_line, y=y_ma, mode='lines',
-                name=f'MA trend: {slope_ma:.4f}/yr (p={p_ma:.3f})',
-                line=dict(color=ma_color, width=2.5)
-            ))
+        ok = np.isfinite(y)
+        x_line = np.array([years.min(), years.max()], dtype=float)
+        intercept = np.median(y[ok] - slope_raw * years[ok])
+        trend_line = (x_line, slope_raw * x_line + intercept)
+        fig.add_trace(go.Scatter(
+            x=trend_line[0], y=trend_line[1], mode='lines',
+            name=f"Sen's slope: {slope_raw:.4f}/yr (MK p={p_raw:.3f})",
+            line=dict(color='#d62728', width=2.5, dash='dash')
+        ))
 
     fig.update_layout(
         title=dict(text=title, font=dict(size=14, color=text_col), x=0.0, xanchor='left'),
@@ -1810,17 +1933,10 @@ def plot_series_with_trends(years: np.ndarray, y: np.ndarray, title: str, ylabel
         fig_mpl, ax = plt.subplots(figsize=(9, 4))
         ax.set_facecolor('#f0f4ff' if night else 'white')
         ax.plot(years, y,  'o-', color=orig_color, markersize=5, alpha=0.45, linewidth=1.5, label=f'{legend_prefix} (Original)')
-        ax.plot(years, ma, 's-', color=ma_color,   markersize=6, alpha=0.9,  linewidth=2.0, label=f'{legend_prefix} (3-yr MA)')
-        if slope_raw is not None:
-            valid_y2 = y[~np.isnan(y)]
-            x_line = np.array([years.min(), years.max()])
-            ax.plot(x_line, slope_raw*(x_line-x_line[0])+valid_y2[0], '--', color=orig_color, linewidth=2, alpha=0.55,
-                    label=f'Original: {slope_raw:.4f}/yr (p={p_raw:.3f})')
-        if slope_ma is not None:
-            valid_ma2 = ma[~np.isnan(ma)]
-            x_line = np.array([years.min(), years.max()])
-            ax.plot(x_line, slope_ma*(x_line-x_line[0])+valid_ma2[0], '-', color=ma_color, linewidth=2.5, alpha=0.9,
-                    label=f'MA: {slope_ma:.4f}/yr (p={p_ma:.3f})')
+        ax.plot(years, ma, 's-', color=ma_color,   markersize=6, alpha=0.9,  linewidth=2.0, label=f'{legend_prefix} (3-yr MA, display only)')
+        if trend_line is not None:
+            ax.plot(trend_line[0], trend_line[1], '--', color='#d62728', linewidth=2.2,
+                    label=f"Sen's slope: {slope_raw:.4f}/yr (MK p={p_raw:.3f})")
         ax.set_title(title, fontsize=12); ax.set_xlabel('Year', fontsize=9); ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, linestyle='--', alpha=0.5, color='#d0d0d0'); ax.legend(fontsize=8)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
@@ -1849,7 +1965,7 @@ def plot_urban_vs_rural_comparison(df: pd.DataFrame, label: str, store_key='urba
         y=np.concatenate([urban, rural[::-1]]),
         fill='toself', fillcolor='rgba(180,180,180,0.20)',
         line=dict(color='rgba(0,0,0,0)'),
-        hoverinfo='skip', showlegend=False, name='UHI gap'
+        hoverinfo='skip', showlegend=False, name='SUHI gap'
     ))
 
     # Urban line
@@ -1875,7 +1991,7 @@ def plot_urban_vs_rural_comparison(df: pd.DataFrame, label: str, store_key='urba
         text=[f'Δ{d:.1f}°C' for d in delta],
         textposition='middle center',
         textfont=dict(size=9, color='#444'),
-        hoverinfo='skip', showlegend=False, name='UHI Δ'
+        hoverinfo='skip', showlegend=False, name='SUHI Δ'
     ))
 
     fig.update_layout(
@@ -2133,7 +2249,22 @@ if run_btn:
 
         for i, yr in enumerate(years):
             progress_bar.progress(i / len(years), text=f"Processing {yr}…")
-            if source.startswith('MODIS'):
+            if source.startswith('MODIS') and use_seasonal_mean:
+                rec_day, rec_nig, months_used = process_modis_seasonal_mean(
+                    yr, aoi_ee, selected_months,
+                    custom_veg_codes if not lulc_ref_mode else None,
+                    custom_urban_codes if not lulc_ref_mode else None,
+                    use_mcd12q1=use_mcd12q1,
+                    platform=modis_platform
+                )
+                if rec_day:
+                    hottest_months[yr] = months_used
+                    results_day.append(rec_day)
+                    ee_layers[int(yr)] = rec_day.pop('EE_Images', {})
+                    if rec_nig:
+                        rec_nig.pop('EE_Images', None)
+                        results_night.append(rec_nig)
+            elif source.startswith('MODIS'):
                 rec_day, best_m, lst_img_day = process_modis_day_and_best_month(
                     yr, aoi_ee, selected_months,
                     custom_veg_codes if not lulc_ref_mode else None,
@@ -2153,7 +2284,19 @@ if run_btn:
                         platform=modis_platform
                     )
                     if rec_nig:
+                        rec_nig.pop('EE_Images', None)
                         results_night.append(rec_nig)
+            elif use_seasonal_mean:
+                rec_day, months_used = process_landsat_seasonal_mean(
+                    yr, aoi_ee, selected_months,
+                    custom_veg_codes if not lulc_ref_mode else None,
+                    custom_urban_codes if not lulc_ref_mode else None,
+                    selected_sensors if not landsat_sensor_recommended else None
+                )
+                if rec_day:
+                    hottest_months[yr] = months_used
+                    results_day.append(rec_day)
+                    ee_layers[int(yr)] = rec_day.pop('EE_Images', {})
             else:
                 rec_day = process_landsat_data(
                     yr, aoi_ee, selected_months,
@@ -2174,6 +2317,14 @@ if run_btn:
             if use_mcd12q1:
                 st.warning("⚠️ You are using MODIS MCD12Q1 land cover (500 m). If your AOI covers a small or low-density urban area, there may be no pixels classified as Urban (class 13) within the boundary. Try switching to NLCD (US-only) for finer 30 m urban detection, or expand your AOI to include more of the urban extent.")
             st.stop()
+
+        # Years without a valid result are kept out of the table (never filled with 0)
+        # and reported to the user; trends use the real year axis, so gaps are handled.
+        _done_day = {int(r['Year']) for r in results_day if r.get('UHI') is not None}
+        _done_night = {int(r['Year']) for r in results_night if r.get('UHI') is not None}
+        missing_day = [y for y in years if y not in _done_day]
+        missing_night = ([y for y in years if y not in _done_night]
+                         if source.startswith('MODIS') else [])
 
         df_day = pd.DataFrame(results_day).sort_values('Year').reset_index(drop=True)
         lst_df = df_day[['Year', 'Mean_LST']].copy()
@@ -2199,13 +2350,17 @@ if run_btn:
             "Years": f"{start_year}-{end_year}",
             "Months": ", ".join(selected_months),
             "Reference classes": ("recommended" if lulc_ref_mode else "custom"),
+            "Month aggregation": ("seasonal mean" if use_seasonal_mean else "hottest month"),
+            "Trend test": trend_test_label,
             "Run finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         st.session_state["analysis_results"] = {
             "aoi": aoi_ee,
             "years": years,
             "hottest_months": hottest_months,
-            "lst_df": lst_df
+            "lst_df": lst_df,
+            "missing_day": missing_day,
+            "missing_night": missing_night,
         }
 
         st.success("Analysis complete.")
@@ -2218,46 +2373,81 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
     df = st.session_state.results_df.copy()
     df_n = st.session_state.results_df_night.copy() if st.session_state.results_df_night is not None else None
 
-    # UHI MA slope & p (table + charts use)
+    # SUHI trend: Sen's slope + Mann–Kendall p on the ORIGINAL annual series
     years_np = df['Year'].astype(int).to_numpy()
-    uhi_ma_day = df['UHI'].astype(float).rolling(window=3, center=True, min_periods=1).mean()
-    slope_day, p_day = sens_slope_and_p(years_np, uhi_ma_day.to_numpy())
+    slope_day, p_day = sens_slope_and_p(years_np, df['UHI'].astype(float).to_numpy())
 
     slope_night, p_night = None, None
     years_np_n = None
     if df_n is not None and not df_n.empty:
         years_np_n = df_n['Year'].astype(int).to_numpy()
-        uhi_ma_n = df_n['UHI'].astype(float).rolling(window=3, center=True, min_periods=1).mean()
-        slope_night, p_night = sens_slope_and_p(years_np_n, uhi_ma_n.to_numpy())
+        slope_night, p_night = sens_slope_and_p(years_np_n, df_n['UHI'].astype(float).to_numpy())
 
-    t1, t2, t3, t4, t5, t6 = st.tabs(["Results Table", "Charts", "Interactive Map", "Land Cover Change", "Shapefile Export", "Validation"])
+    _res_info = st.session_state.get("analysis_results", {})
+    _missing_day = _res_info.get("missing_day", [])
+    _missing_night = _res_info.get("missing_night", [])
+
+    def _low_ref_years(frame):
+        if frame is None or frame.empty:
+            return []
+        return [int(r['Year']) for _, r in frame.iterrows()
+                if low_reference(pd.to_numeric(r.get('Vegetative_Percent'), errors='coerce'),
+                                 pd.to_numeric(r.get('N_Veg_px'), errors='coerce'))]
+
+    def _export_frame(frame, slope, p, tag):
+        """Display/CSV frame: SUHI naming, trend columns, low-reference flag."""
+        out = frame.copy()
+        out['Year'] = out['Year'].astype(int).astype(str)
+        if 'LC_Year' in out.columns and out['LC_Year'].notna().any():
+            out['LC_Year'] = pd.to_numeric(out['LC_Year'], errors='coerce').astype('Int64').astype(str)
+        out['Low_Reference_Flag'] = [
+            low_reference(pd.to_numeric(a, errors='coerce'), pd.to_numeric(b, errors='coerce'))
+            for a, b in zip(out.get('Vegetative_Percent', [np.nan] * len(out)),
+                            out.get('N_Veg_px', [np.nan] * len(out)))]
+        out[f'SUHI_SenSlope_{tag}'] = slope if slope is not None else np.nan
+        out[f'SUHI_MK_p_{tag}'] = p if p is not None else np.nan
+        out['Trend_Test'] = trend_test_label
+        return out.rename(columns={'UHI': 'SUHI', 'Urban': 'Urban_LST', 'Vegetative': 'Vegetative_LST'})
+
+    t1, t2, t3, t4, t5, t6 = st.tabs(["Results Table", "Charts", "Interactive Map", "Land Cover Change",
+                                      "Shapefile Export", "ERA5 Consistency"])
 
     # ----- Results Table
     with t1:
-        st.subheader("UHI Analysis Results")
+        st.subheader("SUHI Analysis Results")
         # Shows exactly which settings produced the numbers below, so a table
         # left over from an earlier city can be spotted immediately.
         _cfg = st.session_state.get("run_config")
         if _cfg:
             st.caption(" · ".join(f"**{k}:** {v}" for k, v in _cfg.items()))
+        # Data-quality notes (missing years, small vegetated reference)
+        if _missing_day:
+            st.warning(f"⚠️ No valid daytime SUHI for {len(_missing_day)} year(s): "
+                       f"{', '.join(map(str, _missing_day))}. These years have no SUHI value (left empty, never set to 0); "
+                       "trend statistics use the remaining years on the real year axis.")
+        if _missing_night:
+            st.info(f"No valid nighttime SUHI for: {', '.join(map(str, _missing_night))}.")
+        _low_day = _low_ref_years(df)
+        if _low_day:
+            st.warning(f"⚠️ Small vegetated reference (< {MIN_REF_PERCENT:.0f}% of the AOI or "
+                       f"< {MIN_REF_PIXELS} valid pixels) in: {', '.join(map(str, _low_day))}. "
+                       "SUHI then depends on very few reference pixels; check the reference classes "
+                       "or enlarge the AOI (see Low_Reference_Flag in the table).")
+
         c1, c2 = st.columns(2)
         with c1:
-            st.metric("UHI 3-yr MA Sen’s slope (Day, °C/yr)", f"{(slope_day or 0):.4f}")
+            st.metric("SUHI Sen’s slope (Day, °C/yr)", _fmt(slope_day))
         with c2:
-            st.metric("UHI 3-yr MA Mann–Kendall p (Day)", f"{(p_day or 1):.4f}")
+            st.metric("SUHI Mann–Kendall p (Day)", _fmt(p_day))
+        st.caption(f"Trend statistics on the original annual series · {trend_test_label}")
 
         # Day table (add slope/p columns)
-        display_df = df.copy()
-        display_df['Year'] = display_df['Year'].astype(int).astype(str)
-        if 'LC_Year' in display_df.columns and display_df['LC_Year'].notna().any():
-            display_df['LC_Year'] = display_df['LC_Year'].astype(int).astype(str)
+        display_df = _export_frame(df, slope_day, p_day, 'Day')
 
-        display_df['UHI_MA_SenSlope_Day'] = slope_day if slope_day is not None else None
-        display_df['UHI_MA_p_Day'] = p_day if p_day is not None else None
-
-        cols_day = ['Year','Month','Satellite','LC_Source','Image_Date','Urban','Vegetative','UHI','Mean_LST',
-                    'Mean_NDVI','Mean_NDMI','Mean_NDBI','Urban_Percent','Vegetative_Percent','Other_Percent',
-                    'LC_Year','UHI_MA_SenSlope_Day','UHI_MA_p_Day']
+        cols_day = ['Year','Month','N_Months','Satellite','LC_Source','Image_Date','Urban_LST','Vegetative_LST','SUHI',
+                    'Mean_LST','Mean_NDVI','Mean_NDMI','Mean_NDBI','Urban_Percent','Vegetative_Percent','Other_Percent',
+                    'N_Valid_px','N_Urban_px','N_Veg_px','Low_Reference_Flag',
+                    'LC_Year','SUHI_SenSlope_Day','SUHI_MK_p_Day','Trend_Test']
         # dict.fromkeys drops any repeat: duplicate column names make pandas
         # raise when the frame is handed to st.dataframe / pyarrow.
         cols_day = [c for c in dict.fromkeys(cols_day) if c in display_df.columns]
@@ -2270,9 +2460,11 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
         _lc_tag = 'MCD12Q1' if use_mcd12q1 else 'NLCD'
         _buf_tag = (str(st.session_state.get('_buffer_mode', '')).split()[0].lower()
                     if aoi_source == "City (US only)" else 'aoi')
+        _agg_tag = 'seasonmean' if use_seasonal_mean else 'hottest'
+        _ref_tag = 'recref' if lulc_ref_mode else 'customref'
         _stem = (f"{selected_state}_{selected_county}_"
                  f"{'MODIS' if source.startswith('MODIS') else 'Landsat'}_{_plat_tag}_"
-                 f"{_lc_tag}_{_buf_tag}_{start_year}_{end_year}").replace(' ', '')
+                 f"{_lc_tag}_{_buf_tag}_{_agg_tag}_{_ref_tag}_{start_year}_{end_year}").replace(' ', '')
         fname_day = f"{_stem}_DAY.csv"
         st.download_button("Download Daytime CSV", csv_day, file_name=fname_day, mime='text/csv')
 
@@ -2280,22 +2472,21 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
         if df_n is not None and not df_n.empty:
             st.markdown("---")
             st.markdown("**Nighttime (MODIS)** — (no NDVI/NDMI/NDBI fields)")
+            _low_n = _low_ref_years(df_n)
+            if _low_n:
+                st.warning(f"⚠️ Small vegetated reference at night in: {', '.join(map(str, _low_n))}.")
             c3, c4 = st.columns(2)
             with c3:
-                st.metric("UHI 3-yr MA Sen’s slope (Night, °C/yr)", f"{(slope_night or 0):.4f}")
+                st.metric("SUHI Sen’s slope (Night, °C/yr)", _fmt(slope_night))
             with c4:
-                st.metric("UHI 3-yr MA Mann–Kendall p (Night)", f"{(p_night or 1):.4f}")
+                st.metric("SUHI Mann–Kendall p (Night)", _fmt(p_night))
 
-            display_n = df_n.copy()
-            display_n['Year'] = display_n['Year'].astype(int).astype(str)
-            if 'LC_Year' in display_n.columns and display_n['LC_Year'].notna().any():
-                display_n['LC_Year'] = display_n['LC_Year'].astype(int).astype(str)
-            display_n['UHI_MA_SenSlope_Night'] = slope_night if slope_night is not None else None
-            display_n['UHI_MA_p_Night'] = p_night if p_night is not None else None
+            display_n = _export_frame(df_n, slope_night, p_night, 'Night')
 
-            cols_n = ['Year','Month','Satellite','LC_Source','Image_Date','Urban','Vegetative','UHI','Mean_LST',
-                      'Urban_Percent','Vegetative_Percent','Other_Percent','LC_Year',
-                      'UHI_MA_SenSlope_Night','UHI_MA_p_Night']
+            cols_n = ['Year','Month','N_Months','Satellite','LC_Source','Image_Date','Urban_LST','Vegetative_LST','SUHI',
+                      'Mean_LST','Urban_Percent','Vegetative_Percent','Other_Percent',
+                      'N_Valid_px','N_Urban_px','N_Veg_px','Low_Reference_Flag','LC_Year',
+                      'SUHI_SenSlope_Night','SUHI_MK_p_Night','Trend_Test']
             cols_n = [c for c in dict.fromkeys(cols_n) if c in display_n.columns]
             st.dataframe(display_n[cols_n], use_container_width=True)
 
@@ -2309,15 +2500,16 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
         st.session_state.chart_figures = {}
 
         # Daytime slope/p shown before charts
-        st.markdown("**Daytime UHI – 3-yr MA trend stats**")
+        st.markdown("**Daytime SUHI – trend of the original annual series**")
         colA, colB = st.columns(2)
-        colA.info(f"Sen’s slope: **{(slope_day or 0):.4f} °C/yr**")
-        colB.info(f"Mann–Kendall p: **{(p_day or 1):.4f}**")
+        colA.info(f"Sen’s slope: **{_fmt(slope_day)} °C/yr**")
+        colB.info(f"Mann–Kendall p: **{_fmt(p_day)}**")
+        st.caption(f"{trend_test_label}. The 3-yr moving average is shown for visual guidance only.")
 
         # Daytime charts
-        st.markdown("**UHI Trend (Day)**")
+        st.markdown("**SUHI Trend (Day)**")
         plot_series_with_trends(years_np, df['UHI'].astype(float).to_numpy(),
-                                title='Trend of UHI Intensity (Day)', ylabel='UHI (°C)', legend_prefix='UHI',
+                                title='Trend of SUHI Intensity (Day)', ylabel='SUHI (°C)', legend_prefix='SUHI',
                                 store_key='uhi_trend_day', night=False)
 
         st.markdown("**Mean LST Trend (Day)**")
@@ -2349,14 +2541,14 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
         if df_n is not None and not df_n.empty:
             st.markdown("---")
             st.subheader("Nighttime LST (MODIS) ")
-            st.markdown("**Nighttime UHI – 3-yr MA trend stats**")
+            st.markdown("**Nighttime SUHI – trend of the original annual series**")
             colC, colD = st.columns(2)
-            colC.info(f"Sen’s slope: **{(slope_night or 0):.4f} °C/yr**")
-            colD.info(f"Mann–Kendall p: **{(p_night or 1):.4f}**")
+            colC.info(f"Sen’s slope: **{_fmt(slope_night)} °C/yr**")
+            colD.info(f"Mann–Kendall p: **{_fmt(p_night)}**")
 
-            st.markdown("**UHI Trend (Night)**")
+            st.markdown("**SUHI Trend (Night)**")
             plot_series_with_trends(years_np_n, df_n['UHI'].astype(float).to_numpy(),
-                                    title='Trend of UHI Intensity (Night)', ylabel='UHI (°C)', legend_prefix='UHI',
+                                    title='Trend of SUHI Intensity (Night)', ylabel='SUHI (°C)', legend_prefix='SUHI',
                                     store_key='uhi_trend_night', night=True)
 
             st.markdown("**Mean LST Trend (Night)**")
@@ -2380,7 +2572,7 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
             zip_buffer.seek(0)
             st.download_button("Download All Charts as ZIP",
                                data=zip_buffer,
-                               file_name=f"UHI_charts_{selected_county}_{start_year}-{end_year}.zip",
+                               file_name=f"SUHI_charts_{selected_county}_{start_year}-{end_year}.zip",
                                mime="application/zip")
 
     # ----- Interactive Map (+ Drive Exports)
@@ -2399,7 +2591,10 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                 center_latlon = get_aoi_center_latlon(st.session_state.aoi_ee)
                 m = folium_map_with_layers(layers, st.session_state.aoi_ee.geometry(), center_latlon)
                 st_folium(m, height=520, width=None, returned_objects=[])
-                st.caption("Use the layer control (top-right) to toggle overlays.")
+                st.caption("Use the layer control (top-right) to toggle overlays. "
+                           "SUHI layer = LST of each urban pixel minus the AOI vegetated-reference value."
+                           + (" Seasonal-mean mode: layers show the hottest month of the season; "
+                              "table values are seasonal means." if use_seasonal_mean else ""))
 
                 st.markdown("**Export rasters to Google Drive (GeoTIFF)**")
                 folder = st.text_input("Drive folder name", value=f"UHI_Exports_{selected_state}_{selected_county}")
@@ -2415,8 +2610,9 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
             st.info("Run analysis for a period of at least two years to see land cover change.")
         else:
             srow, erow = df.iloc[0], df.iloc[-1]
-            ok = all(v is not None for v in [srow.get('Urban_Percent'), srow.get('Vegetative_Percent'),
-                                             erow.get('Urban_Percent'), erow.get('Vegetative_Percent')])
+            ok = all(pd.notna(pd.to_numeric(v, errors='coerce'))
+                     for v in [srow.get('Urban_Percent'), srow.get('Vegetative_Percent'),
+                               erow.get('Urban_Percent'), erow.get('Vegetative_Percent')])
             if not ok:
                 st.warning("Land cover percentages are unavailable for one or both years.")
             else:
@@ -2499,6 +2695,11 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                 center_lat, center_lon = get_aoi_center_latlon(st.session_state.aoi_ee)
                 center_point = shp_Point(center_lon, center_lat)
                 
+                def _num(v):
+                    """float, keeping a real 0.0; NaN only when missing."""
+                    v = pd.to_numeric(v, errors='coerce')
+                    return float(v) if pd.notna(v) else np.nan
+
                 rows = []
                 df_day = st.session_state.results_df
                 df_night = st.session_state.results_df_night
@@ -2521,31 +2722,33 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                         'Sat': str(r_day.get('Satellite', '')),
                         
                         # DAY data
-                        'Urb_D': float(r_day.get('Urban') or np.nan),
-                        'Veg_D': float(r_day.get('Vegetative') or np.nan),
-                        'UHI_D': float(r_day.get('UHI') or np.nan),
-                        'LST_D': float(r_day.get('Mean_LST') or np.nan),
-                        'NDVI': float(r_day.get('Mean_NDVI') or np.nan) if r_day.get('Mean_NDVI') is not None else np.nan,
-                        'NDMI': float(r_day.get('Mean_NDMI') or np.nan) if r_day.get('Mean_NDMI') is not None else np.nan,
-                        'NDBI': float(r_day.get('Mean_NDBI') or np.nan) if r_day.get('Mean_NDBI') is not None else np.nan,
-                        
+                        'Urb_D': _num(r_day.get('Urban')),
+                        'Veg_D': _num(r_day.get('Vegetative')),
+                        'SUHI_D': _num(r_day.get('UHI')),
+                        'LST_D': _num(r_day.get('Mean_LST')),
+                        'NDVI': _num(r_day.get('Mean_NDVI')),
+                        'NDMI': _num(r_day.get('Mean_NDMI')),
+                        'NDBI': _num(r_day.get('Mean_NDBI')),
+
                         # NIGHT data (if available)
-                        'Urb_N': float(r_night.get('Urban') or np.nan) if r_night is not None else np.nan,
-                        'Veg_N': float(r_night.get('Vegetative') or np.nan) if r_night is not None else np.nan,
-                        'UHI_N': float(r_night.get('UHI') or np.nan) if r_night is not None else np.nan,
-                        'LST_N': float(r_night.get('Mean_LST') or np.nan) if r_night is not None else np.nan,
-                        
-                        # Land cover
-                        'LC_YR': int(r_day.get('LC_Year') or 0),
+                        'Urb_N': _num(r_night.get('Urban')) if r_night is not None else np.nan,
+                        'Veg_N': _num(r_night.get('Vegetative')) if r_night is not None else np.nan,
+                        'SUHI_N': _num(r_night.get('UHI')) if r_night is not None else np.nan,
+                        'LST_N': _num(r_night.get('Mean_LST')) if r_night is not None else np.nan,
+
+                        # Land cover and valid-pixel counts
+                        'LC_YR': int(_num(r_day.get('LC_Year'))) if pd.notna(_num(r_day.get('LC_Year'))) else 0,
                         'LC_SRC': str(r_day.get('LC_Source', ''))[:20],
-                        'UrbPct': float(r_day.get('Urban_Percent') or np.nan),
-                        'VegPct': float(r_day.get('Vegetative_Percent') or np.nan),
-                        
-                        # Trend statistics
-                        'Slp_D': float(slope_day or 0.0),
-                        'P_D': float(p_day or 1.0),
-                        'Slp_N': float(slope_night or 0.0) if slope_night is not None else np.nan,
-                        'P_N': float(p_night or 1.0) if p_night is not None else np.nan,
+                        'UrbPct': _num(r_day.get('Urban_Percent')),
+                        'VegPct': _num(r_day.get('Vegetative_Percent')),
+                        'NValid_D': _num(r_day.get('N_Valid_px')),
+                        'NVeg_D': _num(r_day.get('N_Veg_px')),
+
+                        # Trend statistics (original annual series)
+                        'Slp_D': _num(slope_day),
+                        'P_D': _num(p_day),
+                        'Slp_N': _num(slope_night),
+                        'P_N': _num(p_night),
                     }
                     rows.append(row)
                 
@@ -2577,4 +2780,4 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                 st.error(f"Shapefile export failed: {e}")
             
     with t6:
-        render_validation_tab()
+        render_consistency_tab()

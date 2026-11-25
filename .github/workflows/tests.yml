@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install test dependencies (pinned, same versions as requirements.txt)
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==2.2.6 pandas==2.3.3 scipy==1.15.3 pymannkendall==1.4.3 pytest
+      - name: Run unit tests
+        run: pytest -q
