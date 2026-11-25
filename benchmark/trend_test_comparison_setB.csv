@@ -1,0 +1,9 @@
+City,ToD,slope,p_mk,p_hr,p_smoothed
+St. George,DAY,-0.104,0.154,0.154,0.062
+St. George,NIGHT,0.147,0.065,0.065,0.003
+Modesto,DAY,-0.077,0.483,0.483,0.64
+Modesto,NIGHT,0.414,0.0,0.0,0.0
+Bellingham,DAY,-0.028,0.708,0.708,0.691
+Bellingham,NIGHT,-0.2,0.028,0.028,0.001
+Grand Junction,DAY,0.344,0.005,0.034,0.001
+Grand Junction,NIGHT,0.28,0.017,0.017,0.0

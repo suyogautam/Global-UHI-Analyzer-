@@ -155,6 +155,7 @@ ee_folium_map.py       # Folium map wrapper (replaces geemap.foliumap for cloud 
 era5_consistency.py    # ERA5-Land consistency-check tab
 requirements.txt       # Python dependencies (exact versions)
 tests/                 # pytest unit tests
+benchmark/             # end-to-end benchmark and option-sensitivity runs (SoftwareX)
 .github/workflows/     # GitHub Actions: runs the tests
 ```
 

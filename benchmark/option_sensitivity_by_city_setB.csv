@@ -1,0 +1,57 @@
+Test,City,ToD,n_years,mean_diff,mean_abs_diff,r_pearson,trend_diff,same_sign_trend
+T1_terra,St. George,DAY,25,0.066,0.24,0.592,0.079,True
+Q1_aqua,St. George,DAY,22,-0.237,0.275,0.543,-0.151,False
+F6_june,St. George,DAY,25,0.131,0.201,0.473,0.104,False
+F7_july,St. George,DAY,25,0.208,0.237,0.316,0.036,True
+F8_aug,St. George,DAY,25,0.609,0.704,0.116,0.262,False
+V1_no_class21,St. George,DAY,25,-0.07,0.07,0.983,0.004,True
+S1_jja_mean,St. George,DAY,25,0.316,0.366,0.422,0.114,False
+T1_terra,St. George,NIGHT,25,0.01,0.156,0.622,-0.051,True
+Q1_aqua,St. George,NIGHT,22,0.029,0.121,0.663,-0.011,True
+F6_june,St. George,NIGHT,25,0.103,0.21,0.427,0.045,True
+F7_july,St. George,NIGHT,25,0.039,0.112,0.606,-0.009,True
+F8_aug,St. George,NIGHT,25,0.204,0.26,0.288,-0.158,False
+V1_no_class21,St. George,NIGHT,25,-0.002,0.007,0.998,0.002,True
+S1_jja_mean,St. George,NIGHT,25,0.115,0.181,0.611,-0.007,True
+T1_terra,Modesto,DAY,25,0.029,0.166,0.749,0.059,True
+Q1_aqua,Modesto,DAY,22,0.012,0.263,0.213,0.062,True
+F6_june,Modesto,DAY,25,-0.01,0.128,0.735,0.131,False
+F7_july,Modesto,DAY,25,-0.093,0.16,0.674,0.031,True
+F8_aug,Modesto,DAY,25,-0.176,0.284,0.476,-0.012,True
+V1_no_class21,Modesto,DAY,25,4.194,4.194,-0.286,0.266,False
+S1_jja_mean,Modesto,DAY,25,-0.093,0.172,0.823,0.071,True
+T1_terra,Modesto,NIGHT,25,-0.361,0.423,0.509,-0.26,True
+Q1_aqua,Modesto,NIGHT,22,0.026,0.347,0.516,0.131,True
+F6_june,Modesto,NIGHT,25,-0.118,0.17,0.689,-0.059,True
+F7_july,Modesto,NIGHT,25,-0.03,0.144,0.77,-0.15,True
+F8_aug,Modesto,NIGHT,25,-0.059,0.293,0.303,-0.258,True
+V1_no_class21,Modesto,NIGHT,25,2.613,2.613,0.538,0.083,True
+S1_jja_mean,Modesto,NIGHT,25,-0.069,0.178,0.864,-0.152,True
+T1_terra,Bellingham,DAY,25,-0.65,0.65,0.633,-0.191,True
+Q1_aqua,Bellingham,DAY,22,0.28,0.576,0.406,0.1,False
+F6_june,Bellingham,DAY,25,0.275,0.821,-0.215,0.451,False
+F7_july,Bellingham,DAY,25,0.159,0.333,0.366,0.019,True
+F8_aug,Bellingham,DAY,25,-0.614,0.618,0.267,-0.035,True
+V1_no_class21,Bellingham,DAY,25,0.313,0.313,0.975,0.036,False
+S1_jja_mean,Bellingham,DAY,25,-0.06,0.482,0.178,0.139,False
+T1_terra,Bellingham,NIGHT,25,0.175,0.198,0.841,0.058,True
+Q1_aqua,Bellingham,NIGHT,22,-0.264,0.345,0.423,0.173,True
+F6_june,Bellingham,NIGHT,25,0.198,0.354,-0.029,0.071,True
+F7_july,Bellingham,NIGHT,25,0.143,0.164,0.553,0.04,True
+F8_aug,Bellingham,NIGHT,25,-0.117,0.22,0.473,0.111,True
+V1_no_class21,Bellingham,NIGHT,25,-0.044,0.048,0.997,0.0,True
+S1_jja_mean,Bellingham,NIGHT,25,0.075,0.212,0.597,0.061,True
+T1_terra,Grand Junction,DAY,25,0.169,0.284,0.831,0.047,True
+Q1_aqua,Grand Junction,DAY,22,-0.142,0.41,0.698,0.146,True
+F6_june,Grand Junction,DAY,25,0.303,0.332,0.519,-0.053,True
+F7_july,Grand Junction,DAY,25,0.017,0.161,0.747,-0.044,True
+F8_aug,Grand Junction,DAY,25,0.795,0.834,0.207,-0.288,True
+V1_no_class21,Grand Junction,DAY,25,-0.129,0.129,0.984,0.011,True
+S1_jja_mean,Grand Junction,DAY,25,0.372,0.392,0.704,-0.096,True
+T1_terra,Grand Junction,NIGHT,25,-0.335,0.378,0.729,0.02,True
+Q1_aqua,Grand Junction,NIGHT,22,0.259,0.336,0.269,-0.033,True
+F6_june,Grand Junction,NIGHT,25,0.224,0.305,0.617,-0.03,True
+F7_july,Grand Junction,NIGHT,25,0.077,0.158,0.604,-0.074,True
+F8_aug,Grand Junction,NIGHT,25,0.185,0.369,0.407,-0.238,True
+V1_no_class21,Grand Junction,NIGHT,25,0.041,0.041,0.994,0.007,True
+S1_jja_mean,Grand Junction,NIGHT,25,0.162,0.24,0.744,-0.126,True

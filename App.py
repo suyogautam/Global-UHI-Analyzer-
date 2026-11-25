@@ -1892,7 +1892,7 @@ def plot_series_with_trends(years: np.ndarray, y: np.ndarray, title: str, ylabel
         trend_line = (x_line, slope_raw * x_line + intercept)
         fig.add_trace(go.Scatter(
             x=trend_line[0], y=trend_line[1], mode='lines',
-            name=f"Sen's slope: {slope_raw:.4f}/yr (MK p={p_raw:.3f})",
+            name=f"Sen's slope: {slope_raw:.4f}/yr (MK p={_fmt(p_raw, 3)})",
             line=dict(color='#d62728', width=2.5, dash='dash')
         ))
 
@@ -1936,7 +1936,7 @@ def plot_series_with_trends(years: np.ndarray, y: np.ndarray, title: str, ylabel
         ax.plot(years, ma, 's-', color=ma_color,   markersize=6, alpha=0.9,  linewidth=2.0, label=f'{legend_prefix} (3-yr MA, display only)')
         if trend_line is not None:
             ax.plot(trend_line[0], trend_line[1], '--', color='#d62728', linewidth=2.2,
-                    label=f"Sen's slope: {slope_raw:.4f}/yr (MK p={p_raw:.3f})")
+                    label=f"Sen's slope: {slope_raw:.4f}/yr (MK p={_fmt(p_raw, 3)})")
         ax.set_title(title, fontsize=12); ax.set_xlabel('Year', fontsize=9); ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, linestyle='--', alpha=0.5, color='#d0d0d0'); ax.legend(fontsize=8)
         ax.xaxis.set_major_locator(MaxNLocator(integer=True))
@@ -2440,6 +2440,9 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
         with c2:
             st.metric("SUHI Mann–Kendall p (Day)", _fmt(p_day))
         st.caption(f"Trend statistics on the original annual series · {trend_test_label}")
+        if slope_day is not None and p_day is None:
+            st.warning("⚠️ The selected trend test could not be computed for this series; "
+                       "no p-value is reported (no other test is substituted).")
 
         # Day table (add slope/p columns)
         display_df = _export_frame(df, slope_day, p_day, 'Day')
@@ -2480,6 +2483,9 @@ if st.session_state.analysis_ready and st.session_state.results_df is not None:
                 st.metric("SUHI Sen’s slope (Night, °C/yr)", _fmt(slope_night))
             with c4:
                 st.metric("SUHI Mann–Kendall p (Night)", _fmt(p_night))
+            if slope_night is not None and p_night is None:
+                st.warning("⚠️ The selected trend test could not be computed for the night series; "
+                           "no p-value is reported.")
 
             display_n = _export_frame(df_n, slope_night, p_night, 'Night')
 

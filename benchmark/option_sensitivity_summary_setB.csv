@@ -1,0 +1,15 @@
+Test,ToD,mean_diff,mean_abs_diff,r_pearson,trend_diff
+F6_june,DAY,0.17,0.37,0.38,0.16
+F6_june,NIGHT,0.1,0.26,0.43,0.01
+F7_july,DAY,0.07,0.22,0.53,0.01
+F7_july,NIGHT,0.06,0.14,0.63,-0.05
+F8_aug,DAY,0.15,0.61,0.27,-0.02
+F8_aug,NIGHT,0.05,0.29,0.37,-0.14
+Q1_aqua,DAY,-0.02,0.38,0.46,0.04
+Q1_aqua,NIGHT,0.01,0.29,0.47,0.06
+S1_jja_mean,DAY,0.13,0.35,0.53,0.06
+S1_jja_mean,NIGHT,0.07,0.2,0.7,-0.06
+T1_terra,DAY,-0.1,0.34,0.7,-0.0
+T1_terra,NIGHT,-0.13,0.29,0.68,-0.06
+V1_no_class21,DAY,1.08,1.18,0.66,0.08
+V1_no_class21,NIGHT,0.65,0.68,0.88,0.02

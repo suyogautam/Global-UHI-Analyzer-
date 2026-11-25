@@ -1,0 +1,9 @@
+City,ToD,slope,p_mk,p_hr,p_smoothed
+Chattanooga,DAY,0.3,0.017,0.017,0.0
+Chattanooga,NIGHT,-0.013,0.574,0.574,0.623
+Rockford,DAY,-0.046,0.815,0.798,0.427
+Rockford,NIGHT,-0.021,0.907,0.88,0.926
+Gainesville,DAY,0.679,0.002,0.0,0.001
+Gainesville,NIGHT,0.028,0.87,0.87,0.224
+Topeka,DAY,0.292,0.05,0.011,0.008
+Topeka,NIGHT,0.1,0.207,0.066,0.072

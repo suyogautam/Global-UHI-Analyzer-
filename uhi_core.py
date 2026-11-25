@@ -124,7 +124,8 @@ def trend_stats(years, values, test="original"):
 
     test: 'original'  -> original Mann-Kendall
           'hamed_rao' -> Hamed-Rao variance-corrected Mann-Kendall
-    Returns (slope, p); (None, None) with fewer than 3 valid years."""
+    Returns (slope, p). p is None when the selected test cannot be computed;
+    a different test is never substituted. (None, None) with fewer than 3 valid years."""
     x = np.asarray(years, dtype=float)
     y = np.asarray(values, dtype=float)
     ok = np.isfinite(x) & np.isfinite(y)
@@ -134,15 +135,13 @@ def trend_stats(years, values, test="original"):
     order = np.argsort(x)
     x, y = x[order], y[order]
     slope = float(stats.theilslopes(y, x)[0])
-    p = None
-    if HAS_MK:
-        try:
-            if test == "hamed_rao":
-                p = float(mk.hamed_rao_modification_test(y).p)
-            else:
-                p = float(mk.original_test(y).p)
-        except Exception:
-            p = None
-    if p is None or not np.isfinite(p):
-        p = float(stats.kendalltau(x, y)[1])
-    return slope, p
+    if not HAS_MK:
+        return slope, None
+    try:
+        if test == "hamed_rao":
+            p = float(mk.hamed_rao_modification_test(y).p)
+        else:
+            p = float(mk.original_test(y).p)
+    except Exception:
+        return slope, None
+    return slope, (p if np.isfinite(p) else None)

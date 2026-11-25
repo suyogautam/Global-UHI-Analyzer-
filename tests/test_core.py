@@ -131,6 +131,16 @@ def test_trend_ignores_nan_and_needs_three_years():
     assert core.trend_stats([2000, 2001], [1.0, 2.0]) == (None, None)
 
 
+def test_failed_test_returns_no_p_value(monkeypatch):
+    """If the selected test fails, no p-value is returned; another test is never substituted."""
+    def boom(_):
+        raise ValueError("test failed")
+    monkeypatch.setattr(core.mk, "hamed_rao_modification_test", boom)
+    slope, p = core.trend_stats(np.arange(2000, 2010), np.arange(10.0), "hamed_rao")
+    assert slope == pytest.approx(1.0)
+    assert p is None
+
+
 def test_smoothing_inflates_significance():
     """Why the app tests the raw series: a 3-yr moving average makes a
     trend-free noisy series look significant far more often (reviewer comment)."""
